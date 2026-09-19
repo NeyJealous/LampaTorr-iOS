@@ -1,0 +1,47 @@
+name: Publish v0.1.0 release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/publish-v0.1.0.yml
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download original v0.1.0 artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p payload
+          gh run download 35443392452 \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "LampaTorr-unsigned-ipa" \
+            --dir payload
+          find payload -maxdepth 2 -type f -print
+
+      - name: Package release asset
+        run: |
+          set -euo pipefail
+          cd payload
+          zip -9 -r ../LampaTorr-v0.1.0-unsigned.zip .
+          cd ..
+          ls -lh LampaTorr-v0.1.0-unsigned.zip
+
+      - name: Publish v0.1.0
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "v0.1.0" "LampaTorr-v0.1.0-unsigned.zip" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "main" \
+            --title "LampaTorr v0.1.0" \
+            --notes "Original v0.1.0 unsigned build preserved from GitHub Actions run 35443392452. The release tag points to current main because the GitHub integration rejects release creation against the earliest historical commit; the attached IPA is the original v0.1.0 artifact."
