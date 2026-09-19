@@ -9,7 +9,7 @@ final class StartupViewController: UIViewController {
         super.viewDidLoad()
         view.backgroundColor = UIColor(red: 0.114, green: 0.122, blue: 0.125, alpha: 1)
         configureUI()
-        startServer()
+        startServices()
     }
 
     private func configureUI() {
@@ -45,26 +45,44 @@ final class StartupViewController: UIViewController {
     @objc private func retryTapped() {
         retryButton.isHidden = true
         spinner.startAnimating()
-        statusLabel.text = "Запуск встроенного TorrServer…"
-        startServer()
+        startServices()
     }
 
-    private func startServer() {
-        TorrServerManager.shared.start { [weak self] result in
+    private func startServices() {
+        statusLabel.text = "Запуск встроенного TorrServer…"
+
+        TorrServerManager.shared.start { [weak self] torrResult in
             guard let self else { return }
-            switch result {
-            case .success:
-                self.showLampa()
+
+            switch torrResult {
             case .failure(let error):
-                self.spinner.stopAnimating()
-                self.statusLabel.text = error.localizedDescription
-                self.retryButton.isHidden = false
+                self.show(error)
+            case .success:
+                self.statusLabel.text = "Запуск Lampa…"
+
+                LampaHTTPServer.shared.start { [weak self] webResult in
+                    guard let self else { return }
+
+                    switch webResult {
+                    case .failure(let error):
+                        self.show(error)
+                    case .success:
+                        self.showLampa()
+                    }
+                }
             }
         }
     }
 
+    private func show(_ error: Error) {
+        spinner.stopAnimating()
+        statusLabel.text = error.localizedDescription
+        retryButton.isHidden = false
+    }
+
     private func showLampa() {
         guard let window = view.window else { return }
+
         UIView.transition(with: window, duration: 0.25, options: .transitionCrossDissolve) {
             window.rootViewController = LampaViewController()
         }
