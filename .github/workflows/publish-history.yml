@@ -1,0 +1,126 @@
+name: Publish historical releases
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/publish-history.yml
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: "0.1.0"
+            run_id: "35443392452"
+            artifact: "LampaTorr-unsigned-ipa"
+            target: "1029dcbf6658c5bd62d17c40fcda59d120974850"
+          - version: "0.2.0"
+            run_id: "35446096737"
+            artifact: "LampaTorr-LampaS-unsigned-ipa"
+            target: "8137f34a2949f57b22c03fbb45e2b63c7651c7a8"
+          - version: "0.3.0"
+            run_id: "35446227615"
+            artifact: "LampaTorr-LampaS-unsigned-ipa"
+            target: "be442b9eb4522e70f996a5560e4f66eaeadcd349"
+          - version: "0.4.0"
+            run_id: "35446741774"
+            artifact: "LampaTorr-LampaS-unsigned-ipa"
+            target: "69b739484a05822e0c377dc82a846085ceace0f7"
+          - version: "0.5.0"
+            run_id: "35448362397"
+            artifact: "LampaTorr-LampaS-unsigned-ipa"
+            target: "e8af8b48dca3a51a57c94e8e6b9de74954bdc44a"
+          - version: "0.6.0"
+            run_id: "35449328863"
+            artifact: "LampaTorr-LampaS-unsigned-ipa"
+            target: "ec9e17430fc404e3833ff442cf3cde7a6a0123a7"
+          - version: "0.7.0"
+            run_id: "35455206055"
+            artifact: "LampaTorr-LampaS-unsigned-ipa"
+            target: "046e03e113b6b374aa936f7fef578cfc2a3dcba6"
+          - version: "0.8.0"
+            run_id: "35457971024"
+            artifact: "LampaTorr-LampaS-unsigned-ipa"
+            target: "6133b81f1e7d023b2ae212bbda4a61edc302146d"
+          - version: "0.9.0"
+            run_id: "35458843098"
+            artifact: "LampaTorr-LampaS-unsigned-ipa"
+            target: "0bfe43dfefe44b27ad5d42a7fa47fdf48b61c39b"
+          - version: "0.10.0"
+            run_id: "35460293585"
+            artifact: "LampaTorr-LampaS-unsigned-ipa"
+            target: "9a5598d1e5220cf0bb0592fe7efc5b75aef53b21"
+          - version: "0.11.0"
+            run_id: "35460956644"
+            artifact: "LampaTorr-LampaS-unsigned-ipa"
+            target: "6b21c581098b331c17ebc856455408e175ad1886"
+          - version: "1.0.0"
+            run_id: "35461985662"
+            artifact: "LampaTorr-LampaS-unsigned-ipa"
+            target: "6a0b81c1f04f037c93a5300051db1cc4b12cc744"
+          - version: "1.0.1"
+            run_id: "35466211078"
+            artifact: "LampaTorr-LampaS-unsigned-ipa"
+            target: "84857eeba2d4e0877803926f014d503547535a81"
+          - version: "1.0.2"
+            run_id: "35467525716"
+            artifact: "LampaTorr-LampaS-unsigned-ipa"
+            target: "9a415c974e6fc980ccc14633e3b39ce12947d53c"
+          - version: "1.0.3"
+            run_id: "35468246139"
+            artifact: "LampaTorr-LampaS-unsigned-ipa"
+            target: "6a3b063aee5b5596faf692a119b6066fe8180136"
+
+    steps:
+      - name: Download historical artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ matrix.run_id }}
+          ARTIFACT: ${{ matrix.artifact }}
+        run: |
+          set -euo pipefail
+          mkdir -p payload
+          gh run download "$RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "$ARTIFACT" \
+            --dir payload
+          find payload -maxdepth 2 -type f -print
+
+      - name: Package release asset
+        env:
+          VERSION: ${{ matrix.version }}
+        run: |
+          set -euo pipefail
+          FILE="LampaTorr-v${VERSION}-unsigned.zip"
+          cd payload
+          zip -9 -r "../$FILE" .
+          cd ..
+          ls -lh "$FILE"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ matrix.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          TAG="v${VERSION}"
+          FILE="LampaTorr-v${VERSION}-unsigned.zip"
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$FILE" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" "$FILE" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$TARGET" \
+              --title "LampaTorr v${VERSION}" \
+              --notes "Historical unsigned LampaTorr build preserved from the original successful GitHub Actions artifact. Sign the IPA with your own certificate before installation."
+          fi
