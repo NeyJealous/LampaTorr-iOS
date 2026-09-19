@@ -33,7 +33,7 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
     private func configureWebView() {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
-        configuration.applicationNameForUserAgent = "lampa_client lampatorr_ios"
+        configuration.applicationNameForUserAgent = "lampatorr_ios"
         configuration.allowsInlineMediaPlayback = true
         configuration.allowsPictureInPictureMediaPlayback = true
         configuration.allowsAirPlayForMediaPlayback = true
