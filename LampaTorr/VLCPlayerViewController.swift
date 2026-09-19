@@ -1,7 +1,7 @@
 import UIKit
 import VLCKit
 
-final class VLCPlayerViewController: UIViewController {
+final class VLCPlayerViewController: UIViewController, UIGestureRecognizerDelegate {
     private let streamURL: URL
     private let mediaPlayer = VLCMediaPlayer()
 
@@ -261,7 +261,34 @@ final class VLCPlayerViewController: UIViewController {
 
     private func installGestures() {
         let tap = UITapGestureRecognizer(target: self, action: #selector(videoTapped))
-        videoView.addGestureRecognizer(tap)
+        tap.delegate = self
+        tap.cancelsTouchesInView = false
+
+        // Attach the recognizer to the root player view rather than videoView.
+        // VLCKit may insert its own rendering views inside the drawable, so a
+        // recognizer attached only to videoView can stop receiving touches.
+        view.addGestureRecognizer(tap)
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        // Taps on controls must operate the control itself and must not also
+        // toggle the whole overlay. Walk up the touched view hierarchy because
+        // UIButton/UISlider can contain internal UIKit subviews.
+        var touchedView: UIView? = touch.view
+
+        while let current = touchedView {
+            if current is UIControl {
+                return false
+            }
+
+            if current === view {
+                break
+            }
+
+            touchedView = current.superview
+        }
+
+        return true
     }
 
     private func startProgressTimer() {
