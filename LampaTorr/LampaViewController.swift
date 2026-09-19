@@ -4,6 +4,7 @@ import WebKit
 final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
     private var webView: WKWebView!
     private let torrProxy = TorrProxyBridge()
+    private var diagnosticsBridge: LampaDiagnosticsBridge!
     private let lampaURL = URL(string: "https://cf.lampa.mx")!
 
     override func viewDidLoad() {
@@ -36,6 +37,13 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
             name: TorrProxyBridge.messageName
         )
 
+        diagnosticsBridge = LampaDiagnosticsBridge(presenter: self)
+        configuration.userContentController.add(
+            diagnosticsBridge,
+            contentWorld: .page,
+            name: LampaDiagnosticsBridge.messageName
+        )
+
         configuration.userContentController.addUserScript(
             WKUserScript(
                 source: Self.bootstrapScript,
@@ -48,6 +56,14 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
             WKUserScript(
                 source: Self.torrProxyScript,
                 injectionTime: .atDocumentStart,
+                forMainFrameOnly: true
+            )
+        )
+
+        configuration.userContentController.addUserScript(
+            WKUserScript(
+                source: Self.diagnosticsScript,
+                injectionTime: .atDocumentEnd,
                 forMainFrameOnly: true
             )
         )
@@ -574,4 +590,116 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
         window.XMLHttpRequest = ProxyXHR;
     })();
     """#
+
+    private static let diagnosticsScript = #"""
+    (function () {
+        if (window.__lampatorrDiagnosticsInstalled) return;
+        window.__lampatorrDiagnosticsInstalled = true;
+
+        var errors = [];
+        var successes = [];
+        var installed = false;
+        var lastTapAt = 0;
+
+        function text(value) {
+            if (value === undefined || value === null) return '';
+            try { return String(value); } catch (_) { return ''; }
+        }
+
+        function snapshot(kind, event) {
+            var params = event && event.params ? event.params : {};
+            var error = event && event.error ? event.error : {};
+
+            return {
+                kind: kind,
+                time: new Date().toISOString(),
+                url: text(params.url),
+                method: text(params.type || params.method || 'GET').toUpperCase(),
+                dataType: text(params.dataType),
+                timeout: Number(params.timeout || 0),
+                status: Number(error.status || 0),
+                statusText: text(error.statusText),
+                readyState: Number(error.readyState || 0),
+                exception: text(event && event.exception),
+                responseURL: text(error.responseURL)
+            };
+        }
+
+        function push(list, item, limit) {
+            list.unshift(item);
+            if (list.length > limit) list.length = limit;
+        }
+
+        function report() {
+            var now = Date.now();
+            if (now - lastTapAt < 500) return;
+            lastTapAt = now;
+
+            var cubDomain = '';
+            var cubAlive = '';
+            try {
+                cubDomain = localStorage.getItem('cub_domain') || '';
+                cubAlive = localStorage.getItem('cub_alive') || '';
+            } catch (_) {}
+
+            window.webkit.messageHandlers.lampaDiagnostics.postMessage({
+                page: location.href,
+                online: navigator.onLine,
+                cubDomain: cubDomain,
+                cubAlive: cubAlive,
+                errors: errors.slice(0, 10),
+                successes: successes.slice(0, 5)
+            });
+        }
+
+        function install() {
+            if (installed) return;
+
+            if (!window.Lampa || !Lampa.Listener || typeof Lampa.Listener.follow !== 'function') {
+                setTimeout(install, 250);
+                return;
+            }
+
+            var markers = document.querySelector('.head__markers');
+            if (!markers) {
+                setTimeout(install, 250);
+                return;
+            }
+
+            installed = true;
+
+            Lampa.Listener.follow('request_error', function (event) {
+                push(errors, snapshot('error', event), 20);
+            });
+
+            Lampa.Listener.follow('request_secuses', function (event) {
+                push(successes, snapshot('success', event), 10);
+            });
+
+            markers.style.cursor = 'pointer';
+            markers.style.touchAction = 'manipulation';
+
+            // Make the tap target a little wider without changing the visible dots.
+            markers.style.paddingLeft = '0.55em';
+            markers.style.paddingRight = '0.55em';
+            markers.style.marginLeft = '0.45em';
+            markers.style.marginRight = '0.45em';
+
+            markers.addEventListener('click', function (event) {
+                event.preventDefault();
+                event.stopPropagation();
+                report();
+            }, true);
+
+            markers.addEventListener('touchend', function (event) {
+                event.preventDefault();
+                event.stopPropagation();
+                report();
+            }, true);
+        }
+
+        install();
+    })();
+    """#
+
 }
