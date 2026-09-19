@@ -8,6 +8,9 @@ on:
         required: true
         default: "dev.lampatorr.ios"
         type: string
+  push:
+    branches:
+      - main
 
 permissions:
   contents: read
@@ -18,7 +21,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 45
     env:
-      BUNDLE_ID: ${{ inputs.bundle_id }}
+      BUNDLE_ID: ${{ inputs.bundle_id || 'dev.lampatorr.ios' }}
 
     steps:
       - name: Checkout
@@ -28,12 +31,14 @@ jobs:
         run: |
           sw_vers
           xcodebuild -version
+          node --version
+          npm --version
           echo "Bundle ID: $BUNDLE_ID"
 
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Prepare Lampa + TorrServerKit
+      - name: Prepare LampaS web + icon + TorrServerKit
         run: bash ./scripts/prepare.sh
 
       - name: Build unsigned IPA
@@ -42,18 +47,18 @@ jobs:
       - name: Inspect IPA
         run: |
           set -euo pipefail
-          unzip -l LampaTorr-unsigned.ipa | head -80
+          unzip -l LampaTorr-unsigned.ipa | head -100
           test -s LampaTorr-unsigned.ipa
-          echo "### LampaTorr build complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "### LampaTorr LampaS-style build complete" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "Bundle ID: `$BUNDLE_ID`" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Скачай artifact **LampaTorr-unsigned-ipa**, распакуй ZIP на iPhone и подпиши файл **LampaTorr-unsigned.ipa** в Ksign." >> "$GITHUB_STEP_SUMMARY"
+          echo "Includes native storage mirror, LampaS icon, no-op web ad modules and embedded TorrServerKit." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
-          name: LampaTorr-unsigned-ipa
+          name: LampaTorr-LampaS-unsigned-ipa
           path: LampaTorr-unsigned.ipa
           if-no-files-found: error
           retention-days: 14
