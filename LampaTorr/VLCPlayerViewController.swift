@@ -713,9 +713,8 @@ final class VLCPlayerViewController: UIViewController, UIGestureRecognizerDelega
             }
             if track.isSelected { title = "✓ " + title }
 
-            alert.addAction(UIAlertAction(title: title, style: .default) { [weak self, track] _ in
-                track.isSelectedExclusively = true
-                self?.showStatus("Аудиодорожка: " + track.trackName)
+            alert.addAction(UIAlertAction(title: title, style: .default) { [weak self, weak track] _ in
+                track?.isSelectedExclusively = true
                 self?.resetIdleTimer()
             })
         }
@@ -736,9 +735,8 @@ final class VLCPlayerViewController: UIViewController, UIGestureRecognizerDelega
             }
             if track.isSelected { title = "✓ " + title }
 
-            alert.addAction(UIAlertAction(title: title, style: .default) { [weak self, track] _ in
-                track.isSelectedExclusively = true
-                self?.showStatus("Субтитры: " + track.trackName)
+            alert.addAction(UIAlertAction(title: title, style: .default) { [weak self, weak track] _ in
+                track?.isSelectedExclusively = true
                 self?.resetIdleTimer()
             })
         }

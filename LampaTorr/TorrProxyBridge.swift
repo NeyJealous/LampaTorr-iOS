@@ -53,11 +53,6 @@ final class TorrProxyBridge: NSObject, WKScriptMessageHandlerWithReply {
             request.httpBody = Data(body.utf8)
         }
 
-        if method == "GET", url.path.hasPrefix("/download/") {
-            runSpeedProbe(request: request, replyHandler: replyHandler)
-            return
-        }
-
         URLSession.shared.dataTask(with: request) { data, response, error in
             if let error {
                 replyHandler(nil, error.localizedDescription)
@@ -81,53 +76,6 @@ final class TorrProxyBridge: NSObject, WKScriptMessageHandlerWithReply {
                 "statusText": HTTPURLResponse.localizedString(forStatusCode: http.statusCode),
                 "headers": headers,
                 "body": body
-            ], nil)
-        }.resume()
-    }
-
-    private func runSpeedProbe(
-        request: URLRequest,
-        replyHandler: @escaping (Any?, String?) -> Void
-    ) {
-        var probeRequest = request
-        probeRequest.timeoutInterval = min(max(request.timeoutInterval, 1), 20)
-
-        let started = CFAbsoluteTimeGetCurrent()
-
-        URLSession.shared.downloadTask(with: probeRequest) { location, response, error in
-            let elapsedMS = max(1, (CFAbsoluteTimeGetCurrent() - started) * 1000)
-
-            if let error {
-                replyHandler(nil, error.localizedDescription)
-                return
-            }
-
-            guard let http = response as? HTTPURLResponse else {
-                replyHandler(nil, "TorrServer speed test returned an invalid response.")
-                return
-            }
-
-            var headers: [String: String] = [:]
-            for (key, value) in http.allHeaderFields {
-                headers[String(describing: key)] = String(describing: value)
-            }
-
-            var byteCount = max(Int64(0), http.expectedContentLength)
-
-            if let location,
-               let attributes = try? FileManager.default.attributesOfItem(atPath: location.path),
-               let size = attributes[.size] as? NSNumber {
-                byteCount = max(byteCount, size.int64Value)
-            }
-
-            replyHandler([
-                "status": http.statusCode,
-                "statusText": HTTPURLResponse.localizedString(forStatusCode: http.statusCode),
-                "headers": headers,
-                "body": "",
-                "binary": true,
-                "binaryByteCount": byteCount,
-                "elapsedMS": elapsedMS
             ], nil)
         }.resume()
     }
