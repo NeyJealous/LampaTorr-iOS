@@ -1,0 +1,7 @@
+.DS_Store
+build/
+Payload/
+LampaTorr.xcodeproj/
+LampaTorr-unsigned.ipa
+Vendor/Lampa/
+Vendor/TorrServerKit.xcframework/
