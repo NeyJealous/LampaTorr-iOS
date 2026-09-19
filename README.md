@@ -1,60 +1,63 @@
-# LampaTorr iOS — build from iPhone + Ksign
+# LampaTorr iOS — LampaS-style + embedded TorrServer
 
-Personal iOS 18+ host app that runs the official **TorrServerKit in-process** and opens a bundled **Lampa** UI in `WKWebView`.
+iOS 18+ host app that combines a locally bundled **Lampa** UI with the official **TorrServerKit**.
 
-The intended no-Mac workflow is:
+The no-Mac workflow is:
 
-`iPhone → GitHub Actions (macOS/Xcode) → unsigned IPA → Ksign → install on iPhone`
+`iPhone → GitHub Actions → unsigned IPA → Ksign → install`
 
-## What the app does
+## v0.3
 
-- Starts official TorrServerKit on `http://127.0.0.1:8090`.
-- Waits for `/echo` before opening Lampa.
-- Bundles Lampa into the app during the cloud build.
-- On first run sets Lampa's `torrserver_url` to `http://127.0.0.1:8090`.
-- Keeps Lampa and TorrServer in the same iOS process.
-- Rechecks/restarts TorrServer when the app becomes active again.
-- Enables inline media, Picture in Picture and the audio background mode.
+This release fixes the startup `Script error` seen at **Account initialization** in v0.2.
 
-## Build entirely from an iPhone
+The bundled Lampa UI is now served from an in-app loopback HTTP server:
 
-Open the repository:
+- Lampa UI: `http://127.0.0.1:8091`
+- TorrServer: `http://127.0.0.1:8090`
+
+Using a normal HTTP origin instead of `file://` improves compatibility with Web Workers, CUB/account requests, plugins and browser storage.
+
+## LampaS-style behavior
+
+- LampaS-style app icon.
+- Native mirror of Lampa `localStorage` into `UserDefaults` to preserve login/settings more reliably.
+- `lampa_client lampatorr_ios` user agent suffix.
+- WebView tuned for inline video, PiP, autoplay and touch use.
+- Advertising modules are replaced with no-op implementations **before** the Lampa bundle is built.
+- Lampa web source is pinned for reproducible builds.
+- No upstream Android package/certificate identity is spoofed.
+
+## Embedded TorrServer
+
+TorrServerKit starts inside the iOS app on `127.0.0.1:8090`. Lampa is automatically configured to use that address.
+
+For the most reliable streaming, use Lampa's **internal player**. iOS may suspend this app if playback is handed to a separate external player.
+
+## Build on iPhone
+
+Open:
 
 `Actions → Build LampaTorr IPA → Run workflow`
 
-The workflow asks for **Bundle ID**. If your provisioning profile accepts any App ID, the default can be left as:
+Enter a Bundle ID accepted by your Ksign provisioning profile. The default is:
 
 ```text
 dev.lampatorr.ios
 ```
 
-If your provisioning profile is tied to a specific App ID, enter that exact Bundle ID instead.
+After the run succeeds, download artifact **LampaTorr-LampaS-unsigned-ipa**, extract `LampaTorr-unsigned.ipa`, sign it in Ksign and install.
 
-GitHub's macOS runner downloads Lampa and official TorrServerKit, generates the Xcode project and builds an **unsigned device IPA**.
+Do **not** upload your certificate, `.p12`, certificate password or `.mobileprovision` to GitHub.
 
-After the workflow is green:
+## Pinned components
 
-`Actions → completed run → Artifacts → LampaTorr-unsigned-ipa`
-
-GitHub downloads an artifact ZIP. Open it in Files and extract it. Inside is `LampaTorr-unsigned.ipa`.
-
-Open the IPA in **Ksign**, choose your installed certificate and provisioning profile, sign it, then install the resulting signed IPA.
-
-Do **not** upload your `.p12`, certificate password or `.mobileprovision` to GitHub. Signing is done locally in Ksign.
-
-## Versions pinned for reproducibility
-
+- Lampa source: `8150685226a5838040a5795a32be27108491cadb`
 - TorrServerKit: **MatriX.145**
 - Minimum iOS: **18.0**
-- Lampa commit: `d3d3d1cbd943b7fb9de9b470c2f8bc0f3e241a94` (2026-09-17)
 - TorrServerKit SHA-256: `868969629a594c0f033192ed87e5b555b4a96bab69496e3d7dab1b394bc3cc6b`
 
-## iOS limitation
+## Licensing
 
-For the most reliable streaming, use Lampa's **internal player**. If playback is handed to another app, iOS can suspend LampaTorr and therefore its in-process TorrServer. Background audio mode is not a general permission to run an HTTP server indefinitely.
-
-## Licensing / redistribution
-
-This project downloads two upstream GPL components during the build. TorrServer upstream states that its statically linked iOS XCFramework makes the combined host a GPL-3.0 derivative; Lampa's repository carries GPL-2.0. This package is prepared for **personal sideloaded builds**. Review the upstream licenses before redistributing a combined IPA.
+The project combines GPL components. It is prepared for personal sideloaded use. Review the upstream licenses before redistributing a combined IPA.
 
 See `THIRD_PARTY.md`.
