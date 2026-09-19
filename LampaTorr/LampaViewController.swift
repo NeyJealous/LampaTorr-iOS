@@ -53,6 +53,26 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
             )
         )
 
+        // Capture uncaught JS errors into the Xcode/device log instead of only showing
+        // Lampa's generic "Script error" notification.
+        let diagnostics = #"""
+        (function () {
+            window.addEventListener('error', function (event) {
+                try {
+                    console.error('[LampaTorr JS]', event.message, event.filename, event.lineno + ':' + event.colno, event.error && event.error.stack ? event.error.stack : '');
+                } catch (_) {}
+            });
+            window.addEventListener('unhandledrejection', function (event) {
+                try {
+                    console.error('[LampaTorr Promise]', event.reason && event.reason.stack ? event.reason.stack : String(event.reason));
+                } catch (_) {}
+            });
+        })();
+        """#
+        configuration.userContentController.addUserScript(
+            WKUserScript(source: diagnostics, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+        )
+
         webView = WKWebView(frame: .zero, configuration: configuration)
         webView.translatesAutoresizingMaskIntoConstraints = false
         webView.navigationDelegate = self
@@ -82,21 +102,12 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
     }
 
     private func loadLampa() {
-        guard let indexURL = Bundle.main.url(
-            forResource: "index",
-            withExtension: "html",
-            subdirectory: "Lampa"
-        ) else {
-            showFatalError("В приложении отсутствуют web-файлы Lampa.")
-            return
-        }
-
-        let rootURL = indexURL.deletingLastPathComponent()
-        webView.loadFileURL(indexURL, allowingReadAccessTo: rootURL)
+        var request = URLRequest(url: LampaHTTPServer.baseURL)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        webView.load(request)
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        // Capture values written before/around application startup as an additional safeguard.
         webView.evaluateJavaScript(storageBridge.forceSnapshotScript())
     }
 
@@ -111,7 +122,7 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
         }
 
         if let scheme = url.scheme?.lowercased(),
-           !["http", "https", "file", "about", "blob", "data"].contains(scheme) {
+           !["http", "https", "about", "blob", "data"].contains(scheme) {
             if UIApplication.shared.canOpenURL(url) {
                 UIApplication.shared.open(url)
                 decisionHandler(.cancel)
