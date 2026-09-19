@@ -1,37 +1,87 @@
+/*
+ * LampaTorr VLC-style player
+ *
+ * UI architecture and interaction model adapted from VLC for iOS:
+ * https://github.com/videolan/vlc-ios
+ * Reference commit: a96a4ecbdc86437a1a7ac559b60f4443bd4ad305
+ *
+ * VLC for iOS is distributed under GPL-2.0-or-later / MPL-2.0.
+ */
+
 import UIKit
+import AVFoundation
+import MediaPlayer
 import VLCKit
 
 final class VLCPlayerViewController: UIViewController, UIGestureRecognizerDelegate {
+    private enum PanMode {
+        case none, seek, brightness, volume
+    }
+
+    private enum AspectMode: Int, CaseIterable {
+        case fit, fill, ratio16x9, ratio4x3
+
+        var title: String {
+            switch self {
+            case .fit: return "По размеру"
+            case .fill: return "Заполнить экран"
+            case .ratio16x9: return "16:9"
+            case .ratio4x3: return "4:3"
+            }
+        }
+    }
+
     private let streamURL: URL
     private let mediaPlayer = VLCMediaPlayer()
 
-    private let videoView = UIView()
-    private let touchCatcherView = UIView()
-    private let controlsView = UIView()
-    private let topBar = UIView()
-    private let bottomBar = UIView()
+    private let videoOutputView = UIView()
+    private let gestureView = UIView()
+
+    private let topGradientView = UIView()
+    private let bottomGradientView = UIView()
+    private let topGradient = CAGradientLayer()
+    private let bottomGradient = CAGradientLayer()
+
+    private let topBar = UIStackView()
+    private let bottomControls = UIStackView()
+    private let scrubContainer = UIView()
 
     private let closeButton = UIButton(type: .system)
-    private let rotateButton = UIButton(type: .system)
-    private let fitButton = UIButton(type: .system)
+    private let titleLabel = UILabel()
+    private let rotationLockButton = UIButton(type: .system)
 
-    private let rewindButton = UIButton(type: .system)
+    private let tracksButton = UIButton(type: .system)
+    private let backwardButton = UIButton(type: .system)
     private let playPauseButton = UIButton(type: .system)
     private let forwardButton = UIButton(type: .system)
+    private let aspectButton = UIButton(type: .system)
+    private let moreButton = UIButton(type: .system)
 
     private let progressSlider = UISlider()
     private let currentTimeLabel = UILabel()
-    private let durationLabel = UILabel()
+    private let remainingTimeButton = UIButton(type: .system)
 
-    private let audioButton = UIButton(type: .system)
-    private let subtitlesButton = UIButton(type: .system)
+    private let statusContainer = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
+    private let statusLabel = UILabel()
 
-    private var progressTimer: Timer?
-    private var hideControlsWorkItem: DispatchWorkItem?
-    private var controlsVisible = true
-    private var isSeeking = false
-    private var fillMode = false
-    private var forceLandscape = false
+    private let volumeView = MPVolumeView(frame: .zero)
+    private weak var systemVolumeSlider: UISlider?
+
+    private var refreshTimer: Timer?
+    private var idleTimer: Timer?
+    private var controlsHidden = false
+    private var isScrubbing = false
+    private var orientationLocked = false
+    private var lockedOrientationMask: UIInterfaceOrientationMask = .allButUpsideDown
+
+    private var panMode: PanMode = .none
+    private var panStartPosition: Float = 0
+    private var panPreviewPosition: Float = 0
+    private var panStartBrightness: CGFloat = 0
+    private var panStartVolume: Float = 0
+
+    private var aspectMode: AspectMode = .fit
+    private var previousRate: Float = 1
 
     init(streamURL: URL) {
         self.streamURL = streamURL
@@ -46,219 +96,300 @@ final class VLCPlayerViewController: UIViewController, UIGestureRecognizerDelega
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
-        configureUI()
+
+        configureVideoOutput()
+        configureGradients()
+        configureTopBar()
+        configureScrubBar()
+        configureBottomControls()
+        configureStatusHUD()
+        configureVolumeBridge()
+        configureGestures()
         configurePlayer()
-        installGestures()
-        startProgressTimer()
+        startRefreshTimer()
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        topGradient.frame = topGradientView.bounds
+        bottomGradient.frame = bottomGradientView.bounds
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         UIApplication.shared.isIdleTimerDisabled = true
         mediaPlayer.play()
-        scheduleControlsHide()
+        setControlsHidden(false, animated: false)
     }
 
     override func viewWillDisappear(_ animated: Bool) {
-        hideControlsWorkItem?.cancel()
-        progressTimer?.invalidate()
+        idleTimer?.invalidate()
+        refreshTimer?.invalidate()
         mediaPlayer.stop()
         UIApplication.shared.isIdleTimerDisabled = false
         super.viewWillDisappear(animated)
     }
 
     deinit {
-        progressTimer?.invalidate()
+        idleTimer?.invalidate()
+        refreshTimer?.invalidate()
     }
 
-    private func configureUI() {
-        videoView.translatesAutoresizingMaskIntoConstraints = false
-        videoView.backgroundColor = .black
-        videoView.isUserInteractionEnabled = true
+    private func configureVideoOutput() {
+        videoOutputView.translatesAutoresizingMaskIntoConstraints = false
+        videoOutputView.backgroundColor = .black
+        videoOutputView.isUserInteractionEnabled = false
 
-        touchCatcherView.translatesAutoresizingMaskIntoConstraints = false
-        touchCatcherView.backgroundColor = .clear
-        touchCatcherView.isUserInteractionEnabled = true
+        gestureView.translatesAutoresizingMaskIntoConstraints = false
+        gestureView.backgroundColor = .clear
+        gestureView.isUserInteractionEnabled = true
 
-        controlsView.translatesAutoresizingMaskIntoConstraints = false
-        controlsView.backgroundColor = .clear
+        view.addSubview(videoOutputView)
+        view.addSubview(gestureView)
 
+        NSLayoutConstraint.activate([
+            videoOutputView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            videoOutputView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            videoOutputView.topAnchor.constraint(equalTo: view.topAnchor),
+            videoOutputView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+
+            gestureView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            gestureView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            gestureView.topAnchor.constraint(equalTo: view.topAnchor),
+            gestureView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        ])
+    }
+
+    private func configureGradients() {
+        topGradientView.translatesAutoresizingMaskIntoConstraints = false
+        topGradientView.isUserInteractionEnabled = false
+        bottomGradientView.translatesAutoresizingMaskIntoConstraints = false
+        bottomGradientView.isUserInteractionEnabled = false
+
+        topGradient.colors = [
+            UIColor.black.withAlphaComponent(0.72).cgColor,
+            UIColor.clear.cgColor
+        ]
+        topGradient.startPoint = CGPoint(x: 0.5, y: 0)
+        topGradient.endPoint = CGPoint(x: 0.5, y: 1)
+
+        bottomGradient.colors = [
+            UIColor.clear.cgColor,
+            UIColor.black.withAlphaComponent(0.78).cgColor
+        ]
+        bottomGradient.startPoint = CGPoint(x: 0.5, y: 0)
+        bottomGradient.endPoint = CGPoint(x: 0.5, y: 1)
+
+        topGradientView.layer.addSublayer(topGradient)
+        bottomGradientView.layer.addSublayer(bottomGradient)
+
+        view.addSubview(topGradientView)
+        view.addSubview(bottomGradientView)
+
+        NSLayoutConstraint.activate([
+            topGradientView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            topGradientView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            topGradientView.topAnchor.constraint(equalTo: view.topAnchor),
+            topGradientView.heightAnchor.constraint(equalToConstant: 130),
+
+            bottomGradientView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            bottomGradientView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            bottomGradientView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            bottomGradientView.heightAnchor.constraint(equalToConstant: 220)
+        ])
+    }
+
+    private func configureTopBar() {
         topBar.translatesAutoresizingMaskIntoConstraints = false
-        topBar.backgroundColor = UIColor.black.withAlphaComponent(0.42)
+        topBar.axis = .horizontal
+        topBar.alignment = .center
+        topBar.spacing = 12
+        topBar.layoutMargins = UIEdgeInsets(top: 0, left: 14, bottom: 0, right: 14)
+        topBar.isLayoutMarginsRelativeArrangement = true
 
-        bottomBar.translatesAutoresizingMaskIntoConstraints = false
-        bottomBar.backgroundColor = UIColor.black.withAlphaComponent(0.56)
-
-        configureIconButton(closeButton, symbol: "xmark", pointSize: 24)
+        configureIconButton(closeButton, symbol: "xmark", size: 22)
         closeButton.addTarget(self, action: #selector(closeTapped), for: .touchUpInside)
 
-        configureIconButton(rotateButton, symbol: "rectangle.landscape.rotate", pointSize: 22)
-        rotateButton.addTarget(self, action: #selector(rotateTapped), for: .touchUpInside)
+        titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
+        titleLabel.textColor = .white
+        titleLabel.numberOfLines = 1
+        titleLabel.lineBreakMode = .byTruncatingMiddle
+        titleLabel.textAlignment = .center
+        titleLabel.text = mediaTitle
 
-        configureIconButton(fitButton, symbol: "arrow.up.left.and.arrow.down.right", pointSize: 21)
-        fitButton.addTarget(self, action: #selector(fitTapped), for: .touchUpInside)
+        configureIconButton(rotationLockButton, symbol: "lock.rotation", size: 22)
+        rotationLockButton.addTarget(self, action: #selector(rotationLockTapped), for: .touchUpInside)
 
-        configureIconButton(rewindButton, symbol: "gobackward.10", pointSize: 36)
-        rewindButton.addTarget(self, action: #selector(rewindTapped), for: .touchUpInside)
+        topBar.addArrangedSubview(closeButton)
+        topBar.addArrangedSubview(titleLabel)
+        topBar.addArrangedSubview(rotationLockButton)
 
-        configureIconButton(playPauseButton, symbol: "pause.fill", pointSize: 42)
-        playPauseButton.addTarget(self, action: #selector(playPauseTapped), for: .touchUpInside)
+        closeButton.widthAnchor.constraint(equalToConstant: 46).isActive = true
+        closeButton.heightAnchor.constraint(equalToConstant: 46).isActive = true
+        rotationLockButton.widthAnchor.constraint(equalToConstant: 46).isActive = true
+        rotationLockButton.heightAnchor.constraint(equalToConstant: 46).isActive = true
 
-        configureIconButton(forwardButton, symbol: "goforward.10", pointSize: 36)
-        forwardButton.addTarget(self, action: #selector(forwardTapped), for: .touchUpInside)
+        view.addSubview(topBar)
+
+        NSLayoutConstraint.activate([
+            topBar.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
+            topBar.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
+            topBar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 4),
+            topBar.heightAnchor.constraint(equalToConstant: 52)
+        ])
+    }
+
+    private func configureScrubBar() {
+        scrubContainer.translatesAutoresizingMaskIntoConstraints = false
+
+        configureTimeLabel(currentTimeLabel)
+        currentTimeLabel.text = "00:00"
+
+        remainingTimeButton.translatesAutoresizingMaskIntoConstraints = false
+        remainingTimeButton.setTitleColor(.white, for: .normal)
+        remainingTimeButton.titleLabel?.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        remainingTimeButton.contentHorizontalAlignment = .right
+        remainingTimeButton.setTitle("--:--", for: .normal)
+        remainingTimeButton.addTarget(self, action: #selector(remainingTimeTapped), for: .touchUpInside)
 
         progressSlider.translatesAutoresizingMaskIntoConstraints = false
         progressSlider.minimumValue = 0
         progressSlider.maximumValue = 1
-        progressSlider.value = 0
-        progressSlider.addTarget(self, action: #selector(sliderTouchDown), for: .touchDown)
-        progressSlider.addTarget(self, action: #selector(sliderValueChanged), for: .valueChanged)
-        progressSlider.addTarget(self, action: #selector(sliderTouchEnded), for: [.touchUpInside, .touchUpOutside, .touchCancel])
+        progressSlider.minimumTrackTintColor = .white
+        progressSlider.maximumTrackTintColor = UIColor.white.withAlphaComponent(0.28)
+        progressSlider.addTarget(self, action: #selector(scrubTouchDown), for: .touchDown)
+        progressSlider.addTarget(self, action: #selector(scrubChanged), for: .valueChanged)
+        progressSlider.addTarget(self, action: #selector(scrubTouchUp), for: [.touchUpInside, .touchUpOutside, .touchCancel])
 
-        configureTimeLabel(currentTimeLabel)
-        configureTimeLabel(durationLabel)
-        currentTimeLabel.text = "00:00"
-        durationLabel.text = "--:--"
-        durationLabel.textAlignment = .right
-
-        configureTextButton(audioButton, title: "Аудио", symbol: "waveform")
-        audioButton.addTarget(self, action: #selector(audioTapped), for: .touchUpInside)
-
-        configureTextButton(subtitlesButton, title: "Субтитры", symbol: "captions.bubble")
-        subtitlesButton.addTarget(self, action: #selector(subtitlesTapped), for: .touchUpInside)
-
-        view.addSubview(videoView)
-        view.addSubview(touchCatcherView)
-        view.addSubview(controlsView)
-        controlsView.addSubview(topBar)
-        controlsView.addSubview(bottomBar)
-
-        topBar.addSubview(closeButton)
-        topBar.addSubview(rotateButton)
-        topBar.addSubview(fitButton)
-
-        let centerControls = UIStackView(arrangedSubviews: [rewindButton, playPauseButton, forwardButton])
-        centerControls.translatesAutoresizingMaskIntoConstraints = false
-        centerControls.axis = .horizontal
-        centerControls.alignment = .center
-        centerControls.spacing = 34
-        centerControls.distribution = .equalCentering
-        controlsView.addSubview(centerControls)
-
-        let trackStack = UIStackView(arrangedSubviews: [audioButton, subtitlesButton])
-        trackStack.translatesAutoresizingMaskIntoConstraints = false
-        trackStack.axis = .horizontal
-        trackStack.spacing = 12
-        trackStack.alignment = .center
-        bottomBar.addSubview(trackStack)
-
-        bottomBar.addSubview(progressSlider)
-        bottomBar.addSubview(currentTimeLabel)
-        bottomBar.addSubview(durationLabel)
+        scrubContainer.addSubview(currentTimeLabel)
+        scrubContainer.addSubview(progressSlider)
+        scrubContainer.addSubview(remainingTimeButton)
+        view.addSubview(scrubContainer)
 
         NSLayoutConstraint.activate([
-            videoView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            videoView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            videoView.topAnchor.constraint(equalTo: view.topAnchor),
-            videoView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            scrubContainer.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 14),
+            scrubContainer.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -14),
+            scrubContainer.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -66),
+            scrubContainer.heightAnchor.constraint(equalToConstant: 32),
 
-            touchCatcherView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            touchCatcherView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            touchCatcherView.topAnchor.constraint(equalTo: view.topAnchor),
-            touchCatcherView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            currentTimeLabel.leadingAnchor.constraint(equalTo: scrubContainer.leadingAnchor),
+            currentTimeLabel.centerYAnchor.constraint(equalTo: scrubContainer.centerYAnchor),
+            currentTimeLabel.widthAnchor.constraint(equalToConstant: 62),
 
-            controlsView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            controlsView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            controlsView.topAnchor.constraint(equalTo: view.topAnchor),
-            controlsView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            remainingTimeButton.trailingAnchor.constraint(equalTo: scrubContainer.trailingAnchor),
+            remainingTimeButton.centerYAnchor.constraint(equalTo: scrubContainer.centerYAnchor),
+            remainingTimeButton.widthAnchor.constraint(equalToConstant: 72),
+            remainingTimeButton.heightAnchor.constraint(equalToConstant: 30),
 
-            topBar.leadingAnchor.constraint(equalTo: controlsView.leadingAnchor),
-            topBar.trailingAnchor.constraint(equalTo: controlsView.trailingAnchor),
-            topBar.topAnchor.constraint(equalTo: controlsView.topAnchor),
-            topBar.heightAnchor.constraint(equalToConstant: 88),
-
-            closeButton.leadingAnchor.constraint(equalTo: topBar.safeAreaLayoutGuide.leadingAnchor, constant: 12),
-            closeButton.bottomAnchor.constraint(equalTo: topBar.bottomAnchor, constant: -10),
-            closeButton.widthAnchor.constraint(equalToConstant: 50),
-            closeButton.heightAnchor.constraint(equalToConstant: 50),
-
-            rotateButton.trailingAnchor.constraint(equalTo: topBar.safeAreaLayoutGuide.trailingAnchor, constant: -12),
-            rotateButton.bottomAnchor.constraint(equalTo: topBar.bottomAnchor, constant: -10),
-            rotateButton.widthAnchor.constraint(equalToConstant: 50),
-            rotateButton.heightAnchor.constraint(equalToConstant: 50),
-
-            fitButton.trailingAnchor.constraint(equalTo: rotateButton.leadingAnchor, constant: -10),
-            fitButton.bottomAnchor.constraint(equalTo: rotateButton.bottomAnchor),
-            fitButton.widthAnchor.constraint(equalToConstant: 50),
-            fitButton.heightAnchor.constraint(equalToConstant: 50),
-
-            centerControls.centerXAnchor.constraint(equalTo: controlsView.centerXAnchor),
-            centerControls.centerYAnchor.constraint(equalTo: controlsView.centerYAnchor),
-            rewindButton.widthAnchor.constraint(equalToConstant: 68),
-            rewindButton.heightAnchor.constraint(equalToConstant: 68),
-            playPauseButton.widthAnchor.constraint(equalToConstant: 82),
-            playPauseButton.heightAnchor.constraint(equalToConstant: 82),
-            forwardButton.widthAnchor.constraint(equalToConstant: 68),
-            forwardButton.heightAnchor.constraint(equalToConstant: 68),
-
-            bottomBar.leadingAnchor.constraint(equalTo: controlsView.leadingAnchor),
-            bottomBar.trailingAnchor.constraint(equalTo: controlsView.trailingAnchor),
-            bottomBar.bottomAnchor.constraint(equalTo: controlsView.bottomAnchor),
-            bottomBar.heightAnchor.constraint(equalToConstant: 154),
-
-            currentTimeLabel.leadingAnchor.constraint(equalTo: bottomBar.safeAreaLayoutGuide.leadingAnchor, constant: 16),
-            currentTimeLabel.topAnchor.constraint(equalTo: bottomBar.topAnchor, constant: 16),
-            currentTimeLabel.widthAnchor.constraint(equalToConstant: 60),
-
-            durationLabel.trailingAnchor.constraint(equalTo: bottomBar.safeAreaLayoutGuide.trailingAnchor, constant: -16),
-            durationLabel.topAnchor.constraint(equalTo: currentTimeLabel.topAnchor),
-            durationLabel.widthAnchor.constraint(equalToConstant: 70),
-
-            progressSlider.leadingAnchor.constraint(equalTo: currentTimeLabel.trailingAnchor, constant: 10),
-            progressSlider.trailingAnchor.constraint(equalTo: durationLabel.leadingAnchor, constant: -10),
-            progressSlider.centerYAnchor.constraint(equalTo: currentTimeLabel.centerYAnchor),
-
-            trackStack.leadingAnchor.constraint(equalTo: bottomBar.safeAreaLayoutGuide.leadingAnchor, constant: 16),
-            trackStack.bottomAnchor.constraint(equalTo: bottomBar.safeAreaLayoutGuide.bottomAnchor, constant: -12),
-
-            audioButton.heightAnchor.constraint(equalToConstant: 42),
-            subtitlesButton.heightAnchor.constraint(equalToConstant: 42)
+            progressSlider.leadingAnchor.constraint(equalTo: currentTimeLabel.trailingAnchor, constant: 8),
+            progressSlider.trailingAnchor.constraint(equalTo: remainingTimeButton.leadingAnchor, constant: -8),
+            progressSlider.centerYAnchor.constraint(equalTo: scrubContainer.centerYAnchor)
         ])
     }
 
-    private func configureIconButton(_ button: UIButton, symbol: String, pointSize: CGFloat) {
-        button.translatesAutoresizingMaskIntoConstraints = false
-        button.tintColor = .white
-        button.backgroundColor = UIColor.black.withAlphaComponent(0.34)
-        button.layer.cornerRadius = 16
-        button.setImage(
-            UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: pointSize, weight: .medium)),
-            for: .normal
-        )
+    private func configureBottomControls() {
+        bottomControls.translatesAutoresizingMaskIntoConstraints = false
+        bottomControls.axis = .horizontal
+        bottomControls.alignment = .center
+        bottomControls.distribution = .equalCentering
+        bottomControls.spacing = 8
+
+        configureIconButton(tracksButton, symbol: "captions.bubble", size: 22)
+        tracksButton.addTarget(self, action: #selector(tracksTapped), for: .touchUpInside)
+
+        configureIconButton(backwardButton, symbol: "gobackward.10", size: 28)
+        backwardButton.addTarget(self, action: #selector(backwardTapped), for: .touchUpInside)
+
+        configureIconButton(playPauseButton, symbol: "pause.circle.fill", size: 44)
+        playPauseButton.addTarget(self, action: #selector(playPauseTapped), for: .touchUpInside)
+
+        configureIconButton(forwardButton, symbol: "goforward.10", size: 28)
+        forwardButton.addTarget(self, action: #selector(forwardTapped), for: .touchUpInside)
+
+        configureIconButton(aspectButton, symbol: "rectangle.arrowtriangle.2.outward", size: 22)
+        aspectButton.addTarget(self, action: #selector(aspectTapped), for: .touchUpInside)
+
+        configureIconButton(moreButton, symbol: "ellipsis.circle", size: 23)
+        moreButton.addTarget(self, action: #selector(moreTapped), for: .touchUpInside)
+
+        [tracksButton, backwardButton, playPauseButton, forwardButton, aspectButton, moreButton].forEach {
+            bottomControls.addArrangedSubview($0)
+        }
+
+        playPauseButton.widthAnchor.constraint(equalToConstant: 60).isActive = true
+        playPauseButton.heightAnchor.constraint(equalToConstant: 60).isActive = true
+
+        view.addSubview(bottomControls)
+
+        NSLayoutConstraint.activate([
+            bottomControls.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 18),
+            bottomControls.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -18),
+            bottomControls.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -4),
+            bottomControls.heightAnchor.constraint(equalToConstant: 56)
+        ])
     }
 
-    private func configureTextButton(_ button: UIButton, title: String, symbol: String) {
-        button.translatesAutoresizingMaskIntoConstraints = false
-        var configuration = UIButton.Configuration.filled()
-        configuration.title = title
-        configuration.image = UIImage(systemName: symbol)
-        configuration.imagePadding = 7
-        configuration.baseForegroundColor = .white
-        configuration.baseBackgroundColor = UIColor.white.withAlphaComponent(0.14)
-        configuration.cornerStyle = .capsule
-        button.configuration = configuration
+    private func configureStatusHUD() {
+        statusContainer.translatesAutoresizingMaskIntoConstraints = false
+        statusContainer.layer.cornerRadius = 12
+        statusContainer.clipsToBounds = true
+        statusContainer.alpha = 0
+
+        statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        statusLabel.textColor = .white
+        statusLabel.font = .monospacedDigitSystemFont(ofSize: 16, weight: .semibold)
+        statusLabel.textAlignment = .center
+        statusLabel.numberOfLines = 2
+
+        statusContainer.contentView.addSubview(statusLabel)
+        view.addSubview(statusContainer)
+
+        NSLayoutConstraint.activate([
+            statusContainer.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            statusContainer.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            statusContainer.widthAnchor.constraint(greaterThanOrEqualToConstant: 130),
+            statusContainer.heightAnchor.constraint(greaterThanOrEqualToConstant: 58),
+
+            statusLabel.leadingAnchor.constraint(equalTo: statusContainer.contentView.leadingAnchor, constant: 16),
+            statusLabel.trailingAnchor.constraint(equalTo: statusContainer.contentView.trailingAnchor, constant: -16),
+            statusLabel.topAnchor.constraint(equalTo: statusContainer.contentView.topAnchor, constant: 10),
+            statusLabel.bottomAnchor.constraint(equalTo: statusContainer.contentView.bottomAnchor, constant: -10)
+        ])
     }
 
-    private func configureTimeLabel(_ label: UILabel) {
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = .monospacedDigitSystemFont(ofSize: 13, weight: .medium)
-        label.textColor = .white
+    private func configureVolumeBridge() {
+        volumeView.frame = CGRect(x: -1000, y: -1000, width: 1, height: 1)
+        volumeView.alpha = 0.0001
+        view.addSubview(volumeView)
+
+        DispatchQueue.main.async { [weak self] in
+            self?.systemVolumeSlider = self?.volumeView.subviews.compactMap { $0 as? UISlider }.first
+        }
+    }
+
+    private func configureGestures() {
+        let singleTap = UITapGestureRecognizer(target: self, action: #selector(singleTap(_:)))
+        let doubleTap = UITapGestureRecognizer(target: self, action: #selector(doubleTap(_:)))
+        doubleTap.numberOfTapsRequired = 2
+        singleTap.require(toFail: doubleTap)
+
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(panGesture(_:)))
+        pan.maximumNumberOfTouches = 1
+        pan.delegate = self
+
+        let longPress = UILongPressGestureRecognizer(target: self, action: #selector(longPressGesture(_:)))
+        longPress.minimumPressDuration = 0.5
+
+        gestureView.addGestureRecognizer(singleTap)
+        gestureView.addGestureRecognizer(doubleTap)
+        gestureView.addGestureRecognizer(pan)
+        gestureView.addGestureRecognizer(longPress)
     }
 
     private func configurePlayer() {
-        mediaPlayer.drawable = videoView
+        mediaPlayer.drawable = videoOutputView
         mediaPlayer.timeChangeUpdateInterval = 0.5
-        mediaPlayer.videoFitMode = .smaller
+        applyAspectMode(.fit)
 
         guard let media = VLCMedia(url: streamURL) else {
             showError("VLCKit не смог создать медиапоток.")
@@ -270,161 +401,211 @@ final class VLCPlayerViewController: UIViewController, UIGestureRecognizerDelega
         mediaPlayer.media = media
     }
 
-    private func installGestures() {
-        // This layer sits above the VLC drawable and below the controls.
-        // Once controlsView is hidden, it becomes the topmost interactive layer
-        // and reliably receives the tap even if VLCKit inserts its own render view.
-        let showTap = UITapGestureRecognizer(target: self, action: #selector(showControlsTapped))
-        showTap.cancelsTouchesInView = false
-        touchCatcherView.addGestureRecognizer(showTap)
-
-        // While controls are visible, the overlay itself receives taps on free
-        // space. UIControls are excluded by the gesture delegate below.
-        let hideTap = UITapGestureRecognizer(target: self, action: #selector(hideControlsTapped))
-        hideTap.delegate = self
-        hideTap.cancelsTouchesInView = false
-        controlsView.addGestureRecognizer(hideTap)
+    private func configureIconButton(_ button: UIButton, symbol: String, size: CGFloat) {
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.tintColor = .white
+        button.backgroundColor = .clear
+        button.setImage(
+            UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: size, weight: .regular)),
+            for: .normal
+        )
     }
 
-    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-        // Taps on controls must operate the control itself and must not also
-        // toggle the whole overlay. Walk up the touched view hierarchy because
-        // UIButton/UISlider can contain internal UIKit subviews.
-        var touchedView: UIView? = touch.view
-
-        while let current = touchedView {
-            if current is UIControl {
-                return false
-            }
-
-            if current === view {
-                break
-            }
-
-            touchedView = current.superview
-        }
-
-        return true
+    private func configureTimeLabel(_ label: UILabel) {
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        label.textColor = .white
     }
 
-    private func startProgressTimer() {
-        progressTimer?.invalidate()
-        progressTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            self?.refreshPlaybackUI()
+    private func startRefreshTimer() {
+        refreshTimer?.invalidate()
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in
+            self?.refreshUI()
         }
     }
 
-    private func refreshPlaybackUI() {
+    private func refreshUI() {
         let playing = mediaPlayer.isPlaying
-        let symbol = playing ? "pause.fill" : "play.fill"
         playPauseButton.setImage(
-            UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: 42, weight: .medium)),
+            UIImage(
+                systemName: playing ? "pause.circle.fill" : "play.circle.fill",
+                withConfiguration: UIImage.SymbolConfiguration(pointSize: 44, weight: .regular)
+            ),
             for: .normal
         )
 
         let currentMS = max(0, mediaPlayer.time.intValue)
         let durationMS = max(0, mediaPlayer.media?.length.intValue ?? 0)
 
-        if !isSeeking {
+        if !isScrubbing {
             currentTimeLabel.text = formatTime(milliseconds: currentMS)
-            durationLabel.text = durationMS > 0 ? formatTime(milliseconds: durationMS) : "--:--"
 
-            if mediaPlayer.isSeekable, durationMS > 0 {
-                progressSlider.isEnabled = true
+            if durationMS > 0 {
+                progressSlider.isEnabled = mediaPlayer.isSeekable
                 progressSlider.value = Float(max(0, min(1, mediaPlayer.position)))
+                updateRemainingTime(currentMS: currentMS, durationMS: durationMS)
             } else {
                 progressSlider.isEnabled = false
                 progressSlider.value = 0
+                remainingTimeButton.setTitle("--:--", for: .normal)
             }
         }
 
-        audioButton.isEnabled = !mediaPlayer.audioTracks.isEmpty
-        subtitlesButton.isEnabled = !mediaPlayer.textTracks.isEmpty
-        audioButton.alpha = audioButton.isEnabled ? 1 : 0.45
-        subtitlesButton.alpha = subtitlesButton.isEnabled ? 1 : 0.45
+        tracksButton.alpha = (!mediaPlayer.audioTracks.isEmpty || !mediaPlayer.textTracks.isEmpty) ? 1 : 0.45
     }
 
-    private func formatTime(milliseconds: Int32) -> String {
-        let seconds = max(0, Int(milliseconds) / 1000)
-        let hours = seconds / 3600
-        let minutes = (seconds % 3600) / 60
-        let secs = seconds % 60
+    private func setControlsHidden(_ hidden: Bool, animated: Bool) {
+        controlsHidden = hidden
+        idleTimer?.invalidate()
+        idleTimer = nil
 
-        if hours > 0 {
-            return String(format: "%d:%02d:%02d", hours, minutes, secs)
+        let alpha: CGFloat = hidden ? 0 : 1
+        let updates = {
+            self.topBar.alpha = alpha
+            self.scrubContainer.alpha = alpha
+            self.bottomControls.alpha = alpha
+            self.topGradientView.alpha = alpha
+            self.bottomGradientView.alpha = alpha
         }
-        return String(format: "%02d:%02d", minutes, secs)
-    }
 
-    @objc private func showControlsTapped() {
-        guard !controlsVisible else { return }
-        setControlsVisible(true, animated: true)
-        scheduleControlsHide()
-    }
+        let completion: (Bool) -> Void = { _ in
+            let enabled = !hidden
+            self.topBar.isUserInteractionEnabled = enabled
+            self.scrubContainer.isUserInteractionEnabled = enabled
+            self.bottomControls.isUserInteractionEnabled = enabled
+            self.setNeedsStatusBarAppearanceUpdate()
+        }
 
-    @objc private func hideControlsTapped() {
-        guard controlsVisible else { return }
-        setControlsVisible(false, animated: true)
-    }
-
-    private func setControlsVisible(_ visible: Bool, animated: Bool) {
-        controlsVisible = visible
-        hideControlsWorkItem?.cancel()
-
-        if visible {
-            controlsView.isHidden = false
-            controlsView.isUserInteractionEnabled = true
-
-            if animated {
-                controlsView.alpha = 0
-                UIView.animate(withDuration: 0.2) {
-                    self.controlsView.alpha = 1
-                }
-            } else {
-                controlsView.alpha = 1
-            }
+        if animated {
+            UIView.animate(
+                withDuration: 0.2,
+                delay: 0,
+                options: [.beginFromCurrentState, .allowUserInteraction],
+                animations: updates,
+                completion: completion
+            )
         } else {
-            let finishHide = {
-                // Only hide if no newer action has shown the controls again.
-                guard !self.controlsVisible else { return }
-                self.controlsView.alpha = 0
-                self.controlsView.isUserInteractionEnabled = false
-                self.controlsView.isHidden = true
-            }
+            updates()
+            completion(true)
+        }
 
-            if animated {
-                UIView.animate(withDuration: 0.2, animations: {
-                    self.controlsView.alpha = 0
-                }) { _ in
-                    finishHide()
-                }
+        if !hidden {
+            resetIdleTimer()
+        }
+    }
+
+    private func resetIdleTimer() {
+        idleTimer?.invalidate()
+        guard !controlsHidden, !isScrubbing else { return }
+
+        idleTimer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: false) { [weak self] _ in
+            guard let self, !self.isScrubbing else { return }
+            self.setControlsHidden(true, animated: true)
+        }
+    }
+
+    @objc private func singleTap(_ recognizer: UITapGestureRecognizer) {
+        setControlsHidden(!controlsHidden, animated: true)
+    }
+
+    @objc private func doubleTap(_ recognizer: UITapGestureRecognizer) {
+        let point = recognizer.location(in: gestureView)
+        let third = gestureView.bounds.width / 3
+
+        if point.x < third {
+            mediaPlayer.jumpBackward(10)
+            showStatus("⇐ 10 сек")
+        } else if point.x > third * 2 {
+            mediaPlayer.jumpForward(10)
+            showStatus("⇒ 10 сек")
+        } else {
+            cycleAspectMode()
+        }
+
+        resetIdleTimer()
+    }
+
+    @objc private func longPressGesture(_ recognizer: UILongPressGestureRecognizer) {
+        switch recognizer.state {
+        case .began:
+            previousRate = mediaPlayer.rate
+            mediaPlayer.rate = max(2.0, min(8.0, previousRate * 2))
+            showStatus(String(format: "%.1f×", mediaPlayer.rate))
+            setControlsHidden(true, animated: true)
+            UISelectionFeedbackGenerator().selectionChanged()
+        case .ended, .cancelled, .failed:
+            mediaPlayer.rate = previousRate
+            hideStatus()
+        default:
+            break
+        }
+    }
+
+    @objc private func panGesture(_ recognizer: UIPanGestureRecognizer) {
+        let translation = recognizer.translation(in: gestureView)
+        let velocity = recognizer.velocity(in: gestureView)
+        let location = recognizer.location(in: gestureView)
+
+        switch recognizer.state {
+        case .began:
+            idleTimer?.invalidate()
+            idleTimer = nil
+
+            if abs(velocity.x) > abs(velocity.y) {
+                panMode = .seek
+                panStartPosition = Float(mediaPlayer.position)
+                panPreviewPosition = panStartPosition
+            } else if location.x < gestureView.bounds.midX {
+                panMode = .brightness
+                panStartBrightness = UIScreen.main.brightness
             } else {
-                finishHide()
+                panMode = .volume
+                panStartVolume = systemVolumeSlider?.value ?? AVAudioSession.sharedInstance().outputVolume
             }
+
+        case .changed:
+            switch panMode {
+            case .seek:
+                guard mediaPlayer.isSeekable else { return }
+                let delta = Float(translation.x / max(1, gestureView.bounds.width)) * 0.35
+                panPreviewPosition = max(0, min(1, panStartPosition + delta))
+                showSeekPreview(position: panPreviewPosition)
+
+            case .brightness:
+                let delta = -translation.y / max(1, gestureView.bounds.height)
+                let value = max(0, min(1, panStartBrightness + delta))
+                UIScreen.main.brightness = value
+                showStatus("Яркость  \(Int(value * 100))%")
+
+            case .volume:
+                let delta = Float(-translation.y / max(1, gestureView.bounds.height))
+                let value = max(0, min(1, panStartVolume + delta))
+                systemVolumeSlider?.setValue(value, animated: false)
+                systemVolumeSlider?.sendActions(for: .valueChanged)
+                showStatus("Громкость  \(Int(value * 100))%")
+
+            case .none:
+                break
+            }
+
+        case .ended, .cancelled, .failed:
+            if panMode == .seek, mediaPlayer.isSeekable {
+                mediaPlayer.position = Double(panPreviewPosition)
+            }
+            panMode = .none
+            hideStatus(after: 0.45)
+            resetIdleTimer()
+
+        default:
+            break
         }
     }
 
-    private func scheduleControlsHide() {
-        hideControlsWorkItem?.cancel()
-        guard controlsVisible, !isSeeking else { return }
-
-        let item = DispatchWorkItem { [weak self] in
-            guard let self, self.controlsVisible, !self.isSeeking else { return }
-            self.setControlsVisible(false, animated: true)
-        }
-        hideControlsWorkItem = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5, execute: item)
-    }
-
-    private func userInteracted() {
-        if !controlsVisible {
-            setControlsVisible(true, animated: true)
-        }
-        scheduleControlsHide()
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        true
     }
 
     @objc private func closeTapped() {
-        restorePortraitIfNeeded()
         mediaPlayer.stop()
         dismiss(animated: true)
     }
@@ -432,142 +613,278 @@ final class VLCPlayerViewController: UIViewController, UIGestureRecognizerDelega
     @objc private func playPauseTapped() {
         if mediaPlayer.isPlaying {
             mediaPlayer.pause()
-            hideControlsWorkItem?.cancel()
+            setControlsHidden(false, animated: true)
         } else {
             mediaPlayer.play()
-            scheduleControlsHide()
+            resetIdleTimer()
         }
-        refreshPlaybackUI()
+        refreshUI()
     }
 
-    @objc private func rewindTapped() {
+    @objc private func backwardTapped() {
         mediaPlayer.jumpBackward(10)
-        userInteracted()
+        showStatus("⇐ 10 сек")
+        resetIdleTimer()
     }
 
     @objc private func forwardTapped() {
         mediaPlayer.jumpForward(10)
-        userInteracted()
+        showStatus("⇒ 10 сек")
+        resetIdleTimer()
     }
 
-    @objc private func sliderTouchDown() {
-        isSeeking = true
-        hideControlsWorkItem?.cancel()
-    }
+    @objc private func rotationLockTapped() {
+        orientationLocked.toggle()
 
-    @objc private func sliderValueChanged() {
-        let durationMS = max(0, mediaPlayer.media?.length.intValue ?? 0)
-        if durationMS > 0 {
-            let previewMS = Int32(Float(durationMS) * progressSlider.value)
-            currentTimeLabel.text = formatTime(milliseconds: previewMS)
+        if orientationLocked {
+            lockedOrientationMask = currentOrientationMask
+            rotationLockButton.tintColor = .systemOrange
+        } else {
+            lockedOrientationMask = .allButUpsideDown
+            rotationLockButton.tintColor = .white
         }
+
+        setNeedsUpdateOfSupportedInterfaceOrientations()
+        resetIdleTimer()
     }
 
-    @objc private func sliderTouchEnded() {
+    @objc private func aspectTapped() {
+        cycleAspectMode()
+        resetIdleTimer()
+    }
+
+    @objc private func tracksTapped() {
+        idleTimer?.invalidate()
+        presentTracksSheet()
+    }
+
+    @objc private func moreTapped() {
+        idleTimer?.invalidate()
+        presentMoreSheet()
+    }
+
+    @objc private func remainingTimeTapped() {
+        let currentMS = max(0, mediaPlayer.time.intValue)
+        let durationMS = max(0, mediaPlayer.media?.length.intValue ?? 0)
+        guard durationMS > 0 else { return }
+
+        let remaining = max(0, durationMS - currentMS)
+        let currentTitle = remainingTimeButton.title(for: .normal) ?? ""
+
+        if currentTitle.hasPrefix("-") {
+            remainingTimeButton.setTitle(formatTime(milliseconds: durationMS), for: .normal)
+        } else {
+            remainingTimeButton.setTitle("-" + formatTime(milliseconds: remaining), for: .normal)
+        }
+
+        resetIdleTimer()
+    }
+
+    @objc private func scrubTouchDown() {
+        isScrubbing = true
+        idleTimer?.invalidate()
+    }
+
+    @objc private func scrubChanged() {
+        let durationMS = max(0, mediaPlayer.media?.length.intValue ?? 0)
+        guard durationMS > 0 else { return }
+        let targetMS = Int32(Float(durationMS) * progressSlider.value)
+        currentTimeLabel.text = formatTime(milliseconds: targetMS)
+    }
+
+    @objc private func scrubTouchUp() {
         if mediaPlayer.isSeekable {
             mediaPlayer.position = Double(progressSlider.value)
         }
-        isSeeking = false
-        userInteracted()
+        isScrubbing = false
+        resetIdleTimer()
     }
 
-    @objc private func fitTapped() {
-        fillMode.toggle()
-        mediaPlayer.videoFitMode = fillMode ? .larger : .smaller
+    private func presentTracksSheet() {
+        let alert = UIAlertController(title: "Субтитры и аудиодорожки", message: nil, preferredStyle: .actionSheet)
+        let audioTracks = mediaPlayer.audioTracks
+        let textTracks = mediaPlayer.textTracks
 
-        let symbol = fillMode ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right"
-        fitButton.setImage(
-            UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: 21, weight: .medium)),
-            for: .normal
-        )
-        userInteracted()
-    }
-
-    @objc private func rotateTapped() {
-        forceLandscape.toggle()
-        setNeedsUpdateOfSupportedInterfaceOrientations()
-
-        if let scene = view.window?.windowScene {
-            let mask: UIInterfaceOrientationMask = forceLandscape ? .landscape : .portrait
-            scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { error in
-                print("[LampaTorr] Orientation update failed: \(error.localizedDescription)")
-            }
-        }
-
-        userInteracted()
-    }
-
-    @objc private func audioTapped() {
-        hideControlsWorkItem?.cancel()
-        let tracks = mediaPlayer.audioTracks
-
-        guard !tracks.isEmpty else {
-            showSimpleMessage(title: "Аудио", message: "Дополнительные аудиодорожки не найдены.")
-            return
-        }
-
-        let alert = UIAlertController(title: "Аудиодорожка", message: nil, preferredStyle: .actionSheet)
-
-        for track in tracks {
-            var title = track.trackName
-            if let language = track.language, !language.isEmpty, !title.localizedCaseInsensitiveContains(language) {
+        for track in audioTracks {
+            var title = "Аудио: " + track.trackName
+            if let language = track.language, !language.isEmpty,
+               !title.localizedCaseInsensitiveContains(language) {
                 title += " · " + language
             }
-            if track.isSelected {
-                title = "✓ " + title
-            }
+            if track.isSelected { title = "✓ " + title }
 
             alert.addAction(UIAlertAction(title: title, style: .default) { [weak self, weak track] _ in
-                guard let self, let track else { return }
-                track.isSelectedExclusively = true
-                self.scheduleControlsHide()
+                track?.isSelectedExclusively = true
+                self?.resetIdleTimer()
             })
         }
 
-        alert.addAction(UIAlertAction(title: "Отмена", style: .cancel) { [weak self] _ in
-            self?.scheduleControlsHide()
-        })
-
-        preparePopover(alert, sourceView: audioButton)
-        present(alert, animated: true)
-    }
-
-    @objc private func subtitlesTapped() {
-        hideControlsWorkItem?.cancel()
-        let tracks = mediaPlayer.textTracks
-
-        let alert = UIAlertController(title: "Субтитры", message: nil, preferredStyle: .actionSheet)
-
         alert.addAction(UIAlertAction(
-            title: tracks.contains(where: { $0.isSelected }) ? "Выключить субтитры" : "✓ Выключены",
+            title: textTracks.contains(where: { $0.isSelected }) ? "Субтитры: выключить" : "✓ Субтитры: выключены",
             style: .default
         ) { [weak self] _ in
             self?.mediaPlayer.deselectAllTextTracks()
-            self?.scheduleControlsHide()
+            self?.resetIdleTimer()
         })
 
-        for track in tracks {
-            var title = track.trackName
-            if let language = track.language, !language.isEmpty, !title.localizedCaseInsensitiveContains(language) {
+        for track in textTracks {
+            var title = "Субтитры: " + track.trackName
+            if let language = track.language, !language.isEmpty,
+               !title.localizedCaseInsensitiveContains(language) {
                 title += " · " + language
             }
-            if track.isSelected {
-                title = "✓ " + title
-            }
+            if track.isSelected { title = "✓ " + title }
 
             alert.addAction(UIAlertAction(title: title, style: .default) { [weak self, weak track] _ in
-                guard let self, let track else { return }
-                track.isSelectedExclusively = true
-                self.scheduleControlsHide()
+                track?.isSelectedExclusively = true
+                self?.resetIdleTimer()
             })
         }
 
         alert.addAction(UIAlertAction(title: "Отмена", style: .cancel) { [weak self] _ in
-            self?.scheduleControlsHide()
+            self?.resetIdleTimer()
         })
 
-        preparePopover(alert, sourceView: subtitlesButton)
+        preparePopover(alert, sourceView: tracksButton)
         present(alert, animated: true)
+    }
+
+    private func presentMoreSheet() {
+        let alert = UIAlertController(title: "Параметры воспроизведения", message: nil, preferredStyle: .actionSheet)
+
+        let rates: [Float] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+        for rate in rates {
+            let checked = abs(mediaPlayer.rate - rate) < 0.01
+            let title = (checked ? "✓ " : "") + String(format: "Скорость %.2g×", rate)
+
+            alert.addAction(UIAlertAction(title: title, style: .default) { [weak self] _ in
+                self?.mediaPlayer.rate = rate
+                self?.resetIdleTimer()
+            })
+        }
+
+        alert.addAction(UIAlertAction(title: "Повернуть экран", style: .default) { [weak self] _ in
+            self?.rotateScreen()
+            self?.resetIdleTimer()
+        })
+
+        alert.addAction(UIAlertAction(title: "Отмена", style: .cancel) { [weak self] _ in
+            self?.resetIdleTimer()
+        })
+
+        preparePopover(alert, sourceView: moreButton)
+        present(alert, animated: true)
+    }
+
+    private func cycleAspectMode() {
+        let modes = AspectMode.allCases
+        let nextIndex = (aspectMode.rawValue + 1) % modes.count
+        applyAspectMode(modes[nextIndex])
+        showStatus(aspectMode.title)
+    }
+
+    private func applyAspectMode(_ mode: AspectMode) {
+        aspectMode = mode
+
+        switch mode {
+        case .fit:
+            mediaPlayer.videoAspectRatio = nil
+            mediaPlayer.videoFitMode = .smaller
+        case .fill:
+            mediaPlayer.videoAspectRatio = nil
+            mediaPlayer.videoFitMode = .larger
+        case .ratio16x9:
+            mediaPlayer.videoAspectRatio = "16:9"
+            mediaPlayer.videoFitMode = .smaller
+        case .ratio4x3:
+            mediaPlayer.videoAspectRatio = "4:3"
+            mediaPlayer.videoFitMode = .smaller
+        }
+    }
+
+    private func rotateScreen() {
+        guard !orientationLocked, let scene = view.window?.windowScene else {
+            showStatus("Ориентация заблокирована")
+            return
+        }
+
+        let portrait = view.bounds.height >= view.bounds.width
+        let mask: UIInterfaceOrientationMask = portrait ? .landscape : .portrait
+
+        scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { [weak self] error in
+            self?.showStatus(error.localizedDescription)
+        }
+    }
+
+    private var currentOrientationMask: UIInterfaceOrientationMask {
+        guard let orientation = view.window?.windowScene?.interfaceOrientation else {
+            return .allButUpsideDown
+        }
+
+        switch orientation {
+        case .portrait: return .portrait
+        case .portraitUpsideDown: return .portraitUpsideDown
+        case .landscapeLeft: return .landscapeLeft
+        case .landscapeRight: return .landscapeRight
+        default: return .allButUpsideDown
+        }
+    }
+
+    private var mediaTitle: String {
+        let decoded = streamURL.lastPathComponent.removingPercentEncoding ?? streamURL.lastPathComponent
+        return decoded.isEmpty ? "VLC" : decoded
+    }
+
+    private func updateRemainingTime(currentMS: Int32, durationMS: Int32) {
+        let remaining = max(0, durationMS - currentMS)
+        remainingTimeButton.setTitle("-" + formatTime(milliseconds: remaining), for: .normal)
+    }
+
+    private func showSeekPreview(position: Float) {
+        let durationMS = max(0, mediaPlayer.media?.length.intValue ?? 0)
+
+        if durationMS > 0 {
+            let targetMS = Int32(Float(durationMS) * position)
+            showStatus(formatTime(milliseconds: targetMS))
+        } else {
+            showStatus(String(format: "%d%%", Int(position * 100)))
+        }
+    }
+
+    private func formatTime(milliseconds: Int32) -> String {
+        let totalSeconds = max(0, Int(milliseconds) / 1000)
+        let hours = totalSeconds / 3600
+        let minutes = (totalSeconds % 3600) / 60
+        let seconds = totalSeconds % 60
+
+        if hours > 0 {
+            return String(format: "%d:%02d:%02d", hours, minutes, seconds)
+        }
+        return String(format: "%02d:%02d", minutes, seconds)
+    }
+
+    private func showStatus(_ text: String) {
+        statusLabel.text = text
+        statusContainer.layer.removeAllAnimations()
+
+        UIView.animate(withDuration: 0.15) {
+            self.statusContainer.alpha = 1
+        }
+
+        hideStatus(after: 0.8)
+    }
+
+    private func hideStatus(after delay: TimeInterval = 0) {
+        statusContainer.layer.removeAllAnimations()
+
+        UIView.animate(
+            withDuration: 0.2,
+            delay: delay,
+            options: [.beginFromCurrentState],
+            animations: {
+                self.statusContainer.alpha = 0
+            }
+        )
     }
 
     private func preparePopover(_ alert: UIAlertController, sourceView: UIView) {
@@ -575,24 +892,6 @@ final class VLCPlayerViewController: UIViewController, UIGestureRecognizerDelega
             popover.sourceView = sourceView
             popover.sourceRect = sourceView.bounds
         }
-    }
-
-    private func restorePortraitIfNeeded() {
-        guard forceLandscape else { return }
-        forceLandscape = false
-        setNeedsUpdateOfSupportedInterfaceOrientations()
-
-        if let scene = view.window?.windowScene {
-            scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait), errorHandler: nil)
-        }
-    }
-
-    private func showSimpleMessage(title: String, message: String) {
-        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "OK", style: .default) { [weak self] _ in
-            self?.scheduleControlsHide()
-        })
-        present(alert, animated: true)
     }
 
     private func showError(_ message: String) {
@@ -603,11 +902,14 @@ final class VLCPlayerViewController: UIViewController, UIGestureRecognizerDelega
         present(alert, animated: true)
     }
 
-    override var prefersStatusBarHidden: Bool { true }
+    override var prefersStatusBarHidden: Bool {
+        controlsHidden || view.bounds.width > view.bounds.height
+    }
+
     override var prefersHomeIndicatorAutoHidden: Bool { true }
-    override var shouldAutorotate: Bool { true }
+    override var shouldAutorotate: Bool { !orientationLocked }
 
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
-        forceLandscape ? .landscape : .portrait
+        orientationLocked ? lockedOrientationMask : .allButUpsideDown
     }
 }
