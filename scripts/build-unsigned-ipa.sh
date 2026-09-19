@@ -16,7 +16,11 @@ fi
 
 rm -rf build Payload LampaTorr-unsigned.ipa
 
-xcodebuild   -project LampaTorr.xcodeproj   -scheme LampaTorr   -configuration Release   -sdk iphoneos   -derivedDataPath "$ROOT/build/DerivedData"   -resolvePackageDependencies   PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID"   CODE_SIGNING_ALLOWED=NO   CODE_SIGNING_REQUIRED=NO   CODE_SIGN_IDENTITY=""   DEVELOPMENT_TEAM=""   build
+echo "Resolving Swift packages..."
+xcodebuild   -project LampaTorr.xcodeproj   -scheme LampaTorr   -resolvePackageDependencies
+
+echo "Building unsigned device app..."
+xcodebuild   -project LampaTorr.xcodeproj   -scheme LampaTorr   -configuration Release   -sdk iphoneos   -derivedDataPath "$ROOT/build/DerivedData"   PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID"   CODE_SIGNING_ALLOWED=NO   CODE_SIGNING_REQUIRED=NO   CODE_SIGN_IDENTITY=""   DEVELOPMENT_TEAM=""   build
 
 APP="$ROOT/build/DerivedData/Build/Products/Release-iphoneos/LampaTorr.app"
 test -d "$APP"
