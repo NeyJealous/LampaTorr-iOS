@@ -13,10 +13,26 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
         loadLampa()
     }
 
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        restorePortraitOrientation()
+    }
+
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        restorePortraitOrientation()
         UIApplication.shared.isIdleTimerDisabled = true
         TorrServerManager.shared.ensureRunning()
+    }
+
+    private func restorePortraitOrientation() {
+        setNeedsUpdateOfSupportedInterfaceOrientations()
+
+        guard let scene = view.window?.windowScene else { return }
+
+        scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait)) { error in
+            print("[LampaTorr] Failed to restore portrait Lampa orientation: \(error.localizedDescription)")
+        }
     }
 
     private func configureWebView() {
@@ -257,6 +273,10 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
         alert.addAction(UIAlertAction(title: "OK", style: .default))
         present(alert, animated: true)
     }
+
+    override var shouldAutorotate: Bool { true }
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask { .portrait }
+    override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation { .portrait }
 
     override var prefersHomeIndicatorAutoHidden: Bool { true }
     override var prefersStatusBarHidden: Bool { true }
