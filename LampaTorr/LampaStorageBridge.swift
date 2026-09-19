@@ -1,8 +1,8 @@
 import Foundation
 import WebKit
 
-/// Mirrors Lampa localStorage into the native app sandbox.
-/// The Android Lampa client uses the same idea with SharedPreferences.
+/// Mirrors Lampa localStorage into the native app sandbox so login/settings
+/// survive WebView recreation. The actual UI is loaded from https://cf.lampa.mx.
 final class LampaStorageBridge: NSObject, WKScriptMessageHandler {
     static let messageName = "lampaStorage"
 
@@ -32,26 +32,27 @@ final class LampaStorageBridge: NSObject, WKScriptMessageHandler {
             if (window.__lampatorrStorageBridgeInstalled) return;
             window.__lampatorrStorageBridgeInstalled = true;
 
-            const nativeSnapshot = \(json);
+            const nativeSnapshot = (json);
             const post = (message) => {
                 try {
-                    window.webkit.messageHandlers.\(Self.messageName).postMessage(message);
-                } catch (e) {
-                    console.warn('[LampaTorr] native storage message failed', e);
-                }
+                    window.webkit.messageHandlers.(Self.messageName).postMessage(message);
+                } catch (e) {}
             };
 
             try {
-                // Native backup is a recovery source. Never overwrite a newer WebKit value.
                 Object.keys(nativeSnapshot).forEach((key) => {
                     if (localStorage.getItem(key) === null && typeof nativeSnapshot[key] === 'string') {
                         localStorage.setItem(key, nativeSnapshot[key]);
                     }
                 });
 
-                // Embedded TorrServer is authoritative inside LampaTorr.
+                // Native services provided by this iOS host.
                 localStorage.setItem('torrserver_url', 'http://127.0.0.1:8090');
                 localStorage.setItem('torrserver_use_link', 'one');
+
+                // Route torrent playback through Lampa's normal iOS VLC path.
+                // The host intercepts vlc:// and opens embedded VLCKit instead.
+                localStorage.setItem('player_torrent', 'vlc');
 
                 const nativeSetItem = Storage.prototype.setItem;
                 const nativeRemoveItem = Storage.prototype.removeItem;
@@ -85,14 +86,14 @@ final class LampaStorageBridge: NSObject, WKScriptMessageHandler {
                 }
                 post({ op: 'snapshot', data: current });
             } catch (e) {
-                console.error('[LampaTorr] localStorage bootstrap failed', e);
+                console.error('[LampaTorr] storage bootstrap failed', e);
             }
 
             window.LampaTorr = Object.assign(window.LampaTorr || {}, {
                 embeddedTorrServer: true,
+                embeddedVLC: true,
                 torrServerURL: 'http://127.0.0.1:8090',
-                nativeStorageMirror: true,
-                flavor: 'LampaS-iOS'
+                sourceURL: 'https://cf.lampa.mx'
             });
         })();
         """
@@ -107,7 +108,7 @@ final class LampaStorageBridge: NSObject, WKScriptMessageHandler {
                     const key = localStorage.key(i);
                     if (key !== null) current[key] = localStorage.getItem(key) ?? '';
                 }
-                window.webkit.messageHandlers.\(Self.messageName).postMessage({op:'snapshot', data:current});
+                window.webkit.messageHandlers.(Self.messageName).postMessage({op:'snapshot', data:current});
             } catch (e) {}
         })();
         """

@@ -7,9 +7,9 @@ final class StartupViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = UIColor(red: 0.114, green: 0.122, blue: 0.125, alpha: 1)
+        view.backgroundColor = .black
         configureUI()
-        startServices()
+        startServer()
     }
 
     private func configureUI() {
@@ -45,39 +45,24 @@ final class StartupViewController: UIViewController {
     @objc private func retryTapped() {
         retryButton.isHidden = true
         spinner.startAnimating()
-        startServices()
+        startServer()
     }
 
-    private func startServices() {
+    private func startServer() {
         statusLabel.text = "Запуск встроенного TorrServer…"
 
-        TorrServerManager.shared.start { [weak self] torrResult in
+        TorrServerManager.shared.start { [weak self] result in
             guard let self else { return }
 
-            switch torrResult {
-            case .failure(let error):
-                self.show(error)
+            switch result {
             case .success:
-                self.statusLabel.text = "Запуск Lampa…"
-
-                LampaHTTPServer.shared.start { [weak self] webResult in
-                    guard let self else { return }
-
-                    switch webResult {
-                    case .failure(let error):
-                        self.show(error)
-                    case .success:
-                        self.showLampa()
-                    }
-                }
+                self.showLampa()
+            case .failure(let error):
+                self.spinner.stopAnimating()
+                self.statusLabel.text = error.localizedDescription
+                self.retryButton.isHidden = false
             }
         }
-    }
-
-    private func show(_ error: Error) {
-        spinner.stopAnimating()
-        statusLabel.text = error.localizedDescription
-        retryButton.isHidden = false
     }
 
     private func showLampa() {

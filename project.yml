@@ -4,6 +4,12 @@ options:
   deploymentTarget:
     iOS: "18.0"
   createIntermediateGroups: true
+
+packages:
+  VLCKit:
+    url: https://github.com/videolan/vlckit.git
+    revision: 440dc1df19d181b500ae414762671701d192bcf8
+
 settings:
   base:
     SWIFT_VERSION: 5.0
@@ -12,8 +18,8 @@ settings:
     CODE_SIGN_STYLE: Automatic
     TARGETED_DEVICE_FAMILY: "1,2"
     SUPPORTS_MACCATALYST: NO
-    CURRENT_PROJECT_VERSION: 4
-    MARKETING_VERSION: 0.4.0
+    CURRENT_PROJECT_VERSION: 5
+    MARKETING_VERSION: 0.5.0
 
 targets:
   LampaTorr:
@@ -28,6 +34,7 @@ targets:
     dependencies:
       - framework: Vendor/TorrServerKit.xcframework
         embed: false
+      - package: VLCKit
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.lampatorr.ios
@@ -36,22 +43,12 @@ targets:
         GENERATE_INFOPLIST_FILE: NO
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SWIFT_STRICT_CONCURRENCY: minimal
+        OTHER_LDFLAGS: "$(inherited) -ObjC"
     preBuildScripts:
       - name: Verify prepared dependencies
         script: |
           set -e
           test -d "$SRCROOT/Vendor/TorrServerKit.xcframework" || { echo "error: Run ./scripts/prepare.sh first (TorrServerKit missing)"; exit 1; }
-          test -f "$SRCROOT/Vendor/Lampa/index.html" || { echo "error: Run ./scripts/prepare.sh first (Lampa missing)"; exit 1; }
           test -f "$SRCROOT/LampaTorr/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png" || { echo "error: LampaS app icon missing"; exit 1; }
-    postBuildScripts:
-      - name: Copy bundled Lampa web app
-        script: |
-          set -e
-          DEST="$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/Lampa"
-          rm -rf "$DEST"
-          mkdir -p "$DEST"
-          ditto "$SRCROOT/Vendor/Lampa" "$DEST"
-        outputFiles:
-          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Lampa/index.html
     scheme:
       testTargets: []

@@ -4,10 +4,11 @@ import WebKit
 final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
     private var webView: WKWebView!
     private let storageBridge = LampaStorageBridge()
+    private let lampaURL = URL(string: "https://cf.lampa.mx")!
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = UIColor(red: 0.067, green: 0.067, blue: 0.067, alpha: 1)
+        view.backgroundColor = .black
         configureWebView()
         loadLampa()
     }
@@ -20,7 +21,6 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
 
     override func viewWillDisappear(_ animated: Bool) {
         webView?.evaluateJavaScript(storageBridge.forceSnapshotScript())
-        UIApplication.shared.isIdleTimerDisabled = false
         super.viewWillDisappear(animated)
     }
 
@@ -53,26 +53,6 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
             )
         )
 
-        // Capture uncaught JS errors into the Xcode/device log instead of only showing
-        // Lampa's generic "Script error" notification.
-        let diagnostics = #"""
-        (function () {
-            window.addEventListener('error', function (event) {
-                try {
-                    console.error('[LampaTorr JS]', event.message, event.filename, event.lineno + ':' + event.colno, event.error && event.error.stack ? event.error.stack : '');
-                } catch (_) {}
-            });
-            window.addEventListener('unhandledrejection', function (event) {
-                try {
-                    console.error('[LampaTorr Promise]', event.reason && event.reason.stack ? event.reason.stack : String(event.reason));
-                } catch (_) {}
-            });
-        })();
-        """#
-        configuration.userContentController.addUserScript(
-            WKUserScript(source: diagnostics, injectionTime: .atDocumentStart, forMainFrameOnly: true)
-        )
-
         webView = WKWebView(frame: .zero, configuration: configuration)
         webView.translatesAutoresizingMaskIntoConstraints = false
         webView.navigationDelegate = self
@@ -85,12 +65,10 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
         scrollView.showsVerticalScrollIndicator = false
         scrollView.showsHorizontalScrollIndicator = false
         scrollView.bounces = false
-        scrollView.alwaysBounceVertical = false
-        scrollView.alwaysBounceHorizontal = false
 
         webView.isOpaque = false
-        webView.backgroundColor = UIColor(red: 0.067, green: 0.067, blue: 0.067, alpha: 1)
-        scrollView.backgroundColor = webView.backgroundColor
+        webView.backgroundColor = .black
+        scrollView.backgroundColor = .black
 
         view.addSubview(webView)
         NSLayoutConstraint.activate([
@@ -102,8 +80,8 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
     }
 
     private func loadLampa() {
-        var request = URLRequest(url: LampaHTTPServer.baseURL)
-        request.cachePolicy = .reloadIgnoringLocalCacheData
+        var request = URLRequest(url: lampaURL)
+        request.cachePolicy = .useProtocolCachePolicy
         webView.load(request)
     }
 
@@ -121,13 +99,20 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
             return
         }
 
-        if let scheme = url.scheme?.lowercased(),
-           !["http", "https", "about", "blob", "data"].contains(scheme) {
+        let scheme = url.scheme?.lowercased() ?? ""
+
+        if scheme == "vlc" {
+            decisionHandler(.cancel)
+            openEmbeddedVLC(from: url)
+            return
+        }
+
+        if !["http", "https", "about", "blob", "data"].contains(scheme) {
             if UIApplication.shared.canOpenURL(url) {
                 UIApplication.shared.open(url)
-                decisionHandler(.cancel)
-                return
             }
+            decisionHandler(.cancel)
+            return
         }
 
         decisionHandler(.allow)
@@ -145,7 +130,25 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
         return nil
     }
 
-    private func showFatalError(_ message: String) {
+    private func openEmbeddedVLC(from customURL: URL) {
+        let raw = customURL.absoluteString
+        guard raw.lowercased().hasPrefix("vlc://") else { return }
+
+        let streamText = String(raw.dropFirst("vlc://".count))
+        let decoded = streamText.removingPercentEncoding ?? streamText
+
+        guard let streamURL = URL(string: decoded),
+              ["http", "https"].contains(streamURL.scheme?.lowercased() ?? "") else {
+            showError("Не удалось разобрать ссылку потока для встроенного VLC.")
+            return
+        }
+
+        let player = VLCPlayerViewController(streamURL: streamURL)
+        player.modalPresentationStyle = .fullScreen
+        present(player, animated: true)
+    }
+
+    private func showError(_ message: String) {
         let alert = UIAlertController(title: "LampaTorr", message: message, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "OK", style: .default))
         present(alert, animated: true)
