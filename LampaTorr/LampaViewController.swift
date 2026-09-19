@@ -30,10 +30,10 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
 
-        configuration.userContentController.addScriptMessageHandlerWithReply(
+        configuration.userContentController.addScriptMessageHandler(
             torrProxy,
-            named: TorrProxyBridge.messageName,
-            to: .page
+            contentWorld: .page,
+            name: TorrProxyBridge.messageName
         )
 
         configuration.userContentController.addUserScript(
