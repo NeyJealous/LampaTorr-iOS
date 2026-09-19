@@ -8,9 +8,6 @@ on:
         required: true
         default: "dev.lampatorr.ios"
         type: string
-  push:
-    branches:
-      - main
 
 permissions:
   contents: read
@@ -21,7 +18,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 45
     env:
-      BUNDLE_ID: ${{ inputs.bundle_id || 'dev.lampatorr.ios' }}
+      BUNDLE_ID: ${{ inputs.bundle_id }}
 
     steps:
       - name: Checkout
