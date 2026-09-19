@@ -3,52 +3,74 @@ import WebKit
 
 final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
     private var webView: WKWebView!
+    private let storageBridge = LampaStorageBridge()
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = .black
+        view.backgroundColor = UIColor(red: 0.067, green: 0.067, blue: 0.067, alpha: 1)
         configureWebView()
         loadLampa()
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        UIApplication.shared.isIdleTimerDisabled = true
+        TorrServerManager.shared.ensureRunning()
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        webView?.evaluateJavaScript(storageBridge.forceSnapshotScript())
+        UIApplication.shared.isIdleTimerDisabled = false
+        super.viewWillDisappear(animated)
+    }
+
+    deinit {
+        webView?.configuration.userContentController.removeScriptMessageHandler(
+            forName: LampaStorageBridge.messageName
+        )
     }
 
     private func configureWebView() {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
+        configuration.applicationNameForUserAgent = "lampa_client lampatorr_ios"
         configuration.allowsInlineMediaPlayback = true
         configuration.allowsPictureInPictureMediaPlayback = true
+        configuration.allowsAirPlayForMediaPlayback = true
         configuration.mediaTypesRequiringUserActionForPlayback = []
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+        configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
 
-        let bootstrap = #"""
-        (function () {
-            try {
-                if (!localStorage.getItem('torrserver_url')) {
-                    localStorage.setItem('torrserver_url', 'http://127.0.0.1:8090');
-                }
-                if (!localStorage.getItem('torrserver_use_link')) {
-                    localStorage.setItem('torrserver_use_link', 'one');
-                }
-            } catch (e) {
-                console.error('[LampaTorr] localStorage bootstrap failed', e);
-            }
-            window.LampaTorr = {
-                embeddedTorrServer: true,
-                torrServerURL: 'http://127.0.0.1:8090'
-            };
-        })();
-        """#
+        configuration.userContentController.add(
+            storageBridge,
+            name: LampaStorageBridge.messageName
+        )
         configuration.userContentController.addUserScript(
-            WKUserScript(source: bootstrap, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+            WKUserScript(
+                source: storageBridge.bootstrapScript(),
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: true
+            )
         )
 
         webView = WKWebView(frame: .zero, configuration: configuration)
         webView.translatesAutoresizingMaskIntoConstraints = false
         webView.navigationDelegate = self
         webView.uiDelegate = self
-        webView.scrollView.contentInsetAdjustmentBehavior = .never
+        webView.allowsLinkPreview = false
+        webView.allowsBackForwardNavigationGestures = false
+
+        let scrollView = webView.scrollView
+        scrollView.contentInsetAdjustmentBehavior = .never
+        scrollView.showsVerticalScrollIndicator = false
+        scrollView.showsHorizontalScrollIndicator = false
+        scrollView.bounces = false
+        scrollView.alwaysBounceVertical = false
+        scrollView.alwaysBounceHorizontal = false
+
         webView.isOpaque = false
-        webView.backgroundColor = UIColor(red: 0.114, green: 0.122, blue: 0.125, alpha: 1)
-        webView.scrollView.backgroundColor = webView.backgroundColor
+        webView.backgroundColor = UIColor(red: 0.067, green: 0.067, blue: 0.067, alpha: 1)
+        scrollView.backgroundColor = webView.backgroundColor
 
         view.addSubview(webView)
         NSLayoutConstraint.activate([
@@ -71,6 +93,11 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
 
         let rootURL = indexURL.deletingLastPathComponent()
         webView.loadFileURL(indexURL, allowingReadAccessTo: rootURL)
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        // Capture values written before/around application startup as an additional safeguard.
+        webView.evaluateJavaScript(storageBridge.forceSnapshotScript())
     }
 
     func webView(
