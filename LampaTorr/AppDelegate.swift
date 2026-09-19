@@ -21,11 +21,18 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     func applicationDidBecomeActive(_ application: UIApplication) {
         if window?.rootViewController is LampaViewController {
             TorrServerManager.shared.ensureRunning()
+
+            LampaHTTPServer.shared.start { result in
+                if case .failure(let error) = result {
+                    print("[LampaTorr] Lampa web server recovery failed: \(error.localizedDescription)")
+                }
+            }
         }
     }
 
     func applicationWillTerminate(_ application: UIApplication) {
         TorrServerManager.shared.stop()
+        LampaHTTPServer.shared.stop()
     }
 
     private func configureAudioSession() {
