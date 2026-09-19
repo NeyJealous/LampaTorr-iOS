@@ -6,6 +6,7 @@ final class VLCPlayerViewController: UIViewController, UIGestureRecognizerDelega
     private let mediaPlayer = VLCMediaPlayer()
 
     private let videoView = UIView()
+    private let touchCatcherView = UIView()
     private let controlsView = UIView()
     private let topBar = UIView()
     private let bottomBar = UIView()
@@ -75,6 +76,10 @@ final class VLCPlayerViewController: UIViewController, UIGestureRecognizerDelega
         videoView.backgroundColor = .black
         videoView.isUserInteractionEnabled = true
 
+        touchCatcherView.translatesAutoresizingMaskIntoConstraints = false
+        touchCatcherView.backgroundColor = .clear
+        touchCatcherView.isUserInteractionEnabled = true
+
         controlsView.translatesAutoresizingMaskIntoConstraints = false
         controlsView.backgroundColor = .clear
 
@@ -123,6 +128,7 @@ final class VLCPlayerViewController: UIViewController, UIGestureRecognizerDelega
         subtitlesButton.addTarget(self, action: #selector(subtitlesTapped), for: .touchUpInside)
 
         view.addSubview(videoView)
+        view.addSubview(touchCatcherView)
         view.addSubview(controlsView)
         controlsView.addSubview(topBar)
         controlsView.addSubview(bottomBar)
@@ -155,6 +161,11 @@ final class VLCPlayerViewController: UIViewController, UIGestureRecognizerDelega
             videoView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             videoView.topAnchor.constraint(equalTo: view.topAnchor),
             videoView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+
+            touchCatcherView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            touchCatcherView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            touchCatcherView.topAnchor.constraint(equalTo: view.topAnchor),
+            touchCatcherView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
 
             controlsView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             controlsView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
@@ -260,14 +271,19 @@ final class VLCPlayerViewController: UIViewController, UIGestureRecognizerDelega
     }
 
     private func installGestures() {
-        let tap = UITapGestureRecognizer(target: self, action: #selector(videoTapped))
-        tap.delegate = self
-        tap.cancelsTouchesInView = false
+        // This layer sits above the VLC drawable and below the controls.
+        // Once controlsView is hidden, it becomes the topmost interactive layer
+        // and reliably receives the tap even if VLCKit inserts its own render view.
+        let showTap = UITapGestureRecognizer(target: self, action: #selector(showControlsTapped))
+        showTap.cancelsTouchesInView = false
+        touchCatcherView.addGestureRecognizer(showTap)
 
-        // Attach the recognizer to the root player view rather than videoView.
-        // VLCKit may insert its own rendering views inside the drawable, so a
-        // recognizer attached only to videoView can stop receiving touches.
-        view.addGestureRecognizer(tap)
+        // While controls are visible, the overlay itself receives taps on free
+        // space. UIControls are excluded by the gesture delegate below.
+        let hideTap = UITapGestureRecognizer(target: self, action: #selector(hideControlsTapped))
+        hideTap.delegate = self
+        hideTap.cancelsTouchesInView = false
+        controlsView.addGestureRecognizer(hideTap)
     }
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
@@ -340,37 +356,61 @@ final class VLCPlayerViewController: UIViewController, UIGestureRecognizerDelega
         return String(format: "%02d:%02d", minutes, secs)
     }
 
-    @objc private func videoTapped() {
-        setControlsVisible(!controlsVisible, animated: true)
-        if controlsVisible {
-            scheduleControlsHide()
-        }
+    @objc private func showControlsTapped() {
+        guard !controlsVisible else { return }
+        setControlsVisible(true, animated: true)
+        scheduleControlsHide()
+    }
+
+    @objc private func hideControlsTapped() {
+        guard controlsVisible else { return }
+        setControlsVisible(false, animated: true)
     }
 
     private func setControlsVisible(_ visible: Bool, animated: Bool) {
         controlsVisible = visible
         hideControlsWorkItem?.cancel()
 
-        let changes = {
-            self.controlsView.alpha = visible ? 1 : 0
-        }
+        if visible {
+            controlsView.isHidden = false
+            controlsView.isUserInteractionEnabled = true
 
-        if animated {
-            UIView.animate(withDuration: 0.2, animations: changes) { _ in
-                self.controlsView.isUserInteractionEnabled = visible
+            if animated {
+                controlsView.alpha = 0
+                UIView.animate(withDuration: 0.2) {
+                    self.controlsView.alpha = 1
+                }
+            } else {
+                controlsView.alpha = 1
             }
         } else {
-            changes()
-            controlsView.isUserInteractionEnabled = visible
+            let finishHide = {
+                // Only hide if no newer action has shown the controls again.
+                guard !self.controlsVisible else { return }
+                self.controlsView.alpha = 0
+                self.controlsView.isUserInteractionEnabled = false
+                self.controlsView.isHidden = true
+            }
+
+            if animated {
+                UIView.animate(withDuration: 0.2, animations: {
+                    self.controlsView.alpha = 0
+                }) { _ in
+                    finishHide()
+                }
+            } else {
+                finishHide()
+            }
         }
     }
 
     private func scheduleControlsHide() {
         hideControlsWorkItem?.cancel()
-        guard controlsVisible, mediaPlayer.isPlaying, !isSeeking else { return }
+        guard controlsVisible, !isSeeking else { return }
 
         let item = DispatchWorkItem { [weak self] in
-            self?.setControlsVisible(false, animated: true)
+            guard let self, self.controlsVisible, !self.isSeeking else { return }
+            self.setControlsVisible(false, animated: true)
         }
         hideControlsWorkItem = item
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.5, execute: item)
