@@ -127,7 +127,9 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
 
     private func openEmbeddedVLC(from customURL: URL) {
         guard let streamURL = extractEmbeddedVLCStreamURL(from: customURL) else {
-            showError("Не удалось разобрать ссылку видео для встроенного VLC.")
+            let raw = customURL.absoluteString
+            let preview = String(raw.prefix(260))
+            showError("Не удалось разобрать ссылку видео для встроенного VLC.\n\nСхема: \(customURL.scheme ?? "—")\nURL: \(preview)")
             return
         }
 
@@ -140,37 +142,114 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
         let raw = customURL.absoluteString
         let scheme = customURL.scheme?.lowercased() ?? ""
 
-        var candidate: String?
+        if scheme == "vlc" {
+            // Lampa emits: vlc://http://127.0.0.1:8090/stream/...
+            // Foundation parses the nested "http" as the HOST of the outer vlc URL.
+            // Rebuild the inner URL from parsed components before trying raw fallbacks.
+            if let nestedScheme = customURL.host?.lowercased(),
+               nestedScheme == "http" || nestedScheme == "https" {
 
-        if scheme == "vlc-x-callback" {
-            if let components = URLComponents(url: customURL, resolvingAgainstBaseURL: false) {
-                candidate = components.queryItems?.first(where: { $0.name.lowercased() == "url" })?.value
+                var rebuilt = nestedScheme + ":"
+                let encodedPath = customURL.path(percentEncoded: true)
+
+                if encodedPath.hasPrefix("//") {
+                    rebuilt += encodedPath
+                } else if encodedPath.hasPrefix("/") {
+                    rebuilt += "/" + encodedPath
+                } else {
+                    rebuilt += "//" + encodedPath
+                }
+
+                if let components = URLComponents(url: customURL, resolvingAgainstBaseURL: false) {
+                    if let query = components.percentEncodedQuery, !query.isEmpty {
+                        rebuilt += "?" + query
+                    }
+                    if let fragment = components.percentEncodedFragment, !fragment.isEmpty {
+                        rebuilt += "#" + fragment
+                    }
+                }
+
+                if let url = makeEmbeddedMediaURL(rebuilt) {
+                    return url
+                }
             }
-        } else if scheme == "vlc", raw.lowercased().hasPrefix("vlc://") {
-            candidate = String(raw.dropFirst("vlc://".count))
+
+            if raw.lowercased().hasPrefix("vlc://") {
+                let candidate = String(raw.dropFirst("vlc://".count))
+                if let url = makeEmbeddedMediaURL(candidate) {
+                    return url
+                }
+            }
         }
 
-        guard var value = candidate, !value.isEmpty else { return nil }
+        if scheme == "vlc-x-callback",
+           let components = URLComponents(url: customURL, resolvingAgainstBaseURL: false) {
 
+            // Prefer percentEncodedQuery so an encoded stream URL keeps its own
+            // ?, &, Unicode filename and other delimiters intact.
+            if let query = components.percentEncodedQuery {
+                for item in query.split(separator: "&", omittingEmptySubsequences: false) {
+                    let pair = item.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+                    guard pair.count == 2,
+                          pair[0].lowercased() == "url" else { continue }
+
+                    let encodedValue = String(pair[1])
+                    if let url = makeEmbeddedMediaURL(encodedValue) {
+                        return url
+                    }
+                }
+            }
+
+            if let value = components.queryItems?.first(where: { $0.name.lowercased() == "url" })?.value,
+               let url = makeEmbeddedMediaURL(value) {
+                return url
+            }
+        }
+
+        return nil
+    }
+
+    private func makeEmbeddedMediaURL(_ source: String) -> URL? {
+        guard !source.isEmpty else { return nil }
+
+        var candidates: [String] = [source]
+        var current = source
+
+        // Some player schemes encode the whole media URL once or twice.
         for _ in 0..<3 {
-            let decoded = value.removingPercentEncoding ?? value
-            if decoded == value { break }
-            value = decoded
+            guard let decoded = current.removingPercentEncoding,
+                  decoded != current else { break }
+            candidates.append(decoded)
+            current = decoded
         }
 
-        if let range = value.range(of: "http://", options: .caseInsensitive) {
-            value = String(value[range.lowerBound...])
-        } else if let range = value.range(of: "https://", options: .caseInsensitive) {
-            value = String(value[range.lowerBound...])
+        for original in candidates {
+            var value = original.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if value.lowercased().hasPrefix("http//") {
+                value = "http://" + String(value.dropFirst("http//".count))
+            } else if value.lowercased().hasPrefix("https//") {
+                value = "https://" + String(value.dropFirst("https//".count))
+            }
+
+            if !value.lowercased().hasPrefix("http://") &&
+               !value.lowercased().hasPrefix("https://") {
+
+                if let range = value.range(of: "http://", options: .caseInsensitive) {
+                    value = String(value[range.lowerBound...])
+                } else if let range = value.range(of: "https://", options: .caseInsensitive) {
+                    value = String(value[range.lowerBound...])
+                }
+            }
+
+            if let url = URL(string: value, encodingInvalidCharacters: true),
+               let mediaScheme = url.scheme?.lowercased(),
+               mediaScheme == "http" || mediaScheme == "https" {
+                return url
+            }
         }
 
-        guard let url = URL(string: value),
-              let mediaScheme = url.scheme?.lowercased(),
-              mediaScheme == "http" || mediaScheme == "https" else {
-            return nil
-        }
-
-        return url
+        return nil
     }
 
     private func showError(_ message: String) {
