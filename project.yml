@@ -12,8 +12,8 @@ settings:
     CODE_SIGN_STYLE: Automatic
     TARGETED_DEVICE_FAMILY: "1,2"
     SUPPORTS_MACCATALYST: NO
-    CURRENT_PROJECT_VERSION: 1
-    MARKETING_VERSION: 0.1.0
+    CURRENT_PROJECT_VERSION: 2
+    MARKETING_VERSION: 0.2.0
 
 targets:
   LampaTorr:
@@ -24,6 +24,7 @@ targets:
       - path: LampaTorr
         excludes:
           - Info.plist
+          - Resources/LampaSIcon.base64
     dependencies:
       - framework: Vendor/TorrServerKit.xcframework
         embed: false
@@ -33,7 +34,7 @@ targets:
         PRODUCT_NAME: LampaTorr
         INFOPLIST_FILE: LampaTorr/Info.plist
         GENERATE_INFOPLIST_FILE: NO
-        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SWIFT_STRICT_CONCURRENCY: minimal
     preBuildScripts:
       - name: Verify prepared dependencies
@@ -41,6 +42,7 @@ targets:
           set -e
           test -d "$SRCROOT/Vendor/TorrServerKit.xcframework" || { echo "error: Run ./scripts/prepare.sh first (TorrServerKit missing)"; exit 1; }
           test -f "$SRCROOT/Vendor/Lampa/index.html" || { echo "error: Run ./scripts/prepare.sh first (Lampa missing)"; exit 1; }
+          test -f "$SRCROOT/LampaTorr/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png" || { echo "error: LampaS app icon missing"; exit 1; }
     postBuildScripts:
       - name: Copy bundled Lampa web app
         script: |
