@@ -291,6 +291,10 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
             localStorage.setItem('player', 'vlc');
             localStorage.setItem('player_torrent', 'vlc');
 
+            // Embedded VLCKit performs its own buffering. Avoid holding playback
+            // behind Lampa's separate TorrServer preload screen.
+            localStorage.setItem('torrserver_preload', 'false');
+
             window.LampaTorr = {
                 embeddedTorrServer: true,
                 embeddedVLC: true,
@@ -512,8 +516,60 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
                 self._responseHeaders = result.headers || {};
                 self._status = Number(result.status || 0);
                 self._statusText = result.statusText || '';
-                self._responseText = result.body || '';
                 self._responseURL = self._url;
+
+                // TorrServer /download/<MB> is binary and Lampa measures it using
+                // XHR progress timestamps. The native bridge downloads it without
+                // copying hundreds of MB into JavaScript, then synthesizes the
+                // browser events Lampa needs for its Mbps calculation.
+                if (result.binary && self._responseType === 'arraybuffer') {
+                    var byteCount = Number(result.binaryByteCount || 0);
+                    var elapsedMS = Math.max(1, Number(result.elapsedMS || 1));
+                    var finishedAt = performance.now();
+                    var startedAt = Math.max(0, finishedAt - elapsedMS);
+
+                    self._responseText = '';
+                    self._response = { byteLength: byteCount };
+
+                    self._readyState = 2;
+                    self._emit('readystatechange', {
+                        type: 'readystatechange',
+                        timeStamp: startedAt
+                    });
+
+                    self._readyState = 3;
+                    self._emit('readystatechange', {
+                        type: 'readystatechange',
+                        timeStamp: finishedAt
+                    });
+
+                    self._emit('progress', {
+                        type: 'progress',
+                        timeStamp: finishedAt,
+                        loaded: byteCount,
+                        total: byteCount,
+                        lengthComputable: true
+                    });
+
+                    // Lampa aborts the 300 MB test once its stop threshold is hit.
+                    if (self._aborted) return;
+
+                    self._readyState = 4;
+                    self._emit('readystatechange', {
+                        type: 'readystatechange',
+                        timeStamp: finishedAt
+                    });
+
+                    if (self._status >= 200 && self._status < 400) {
+                        self._emit('load', { type: 'load', timeStamp: finishedAt });
+                    } else {
+                        self._emit('error', { type: 'error', timeStamp: finishedAt });
+                    }
+                    self._emit('loadend', { type: 'loadend', timeStamp: finishedAt });
+                    return;
+                }
+
+                self._responseText = result.body || '';
 
                 self._readyState = 2;
                 self._emit('readystatechange');
