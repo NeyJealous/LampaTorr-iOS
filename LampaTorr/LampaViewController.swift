@@ -96,7 +96,7 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
 
         let scheme = url.scheme?.lowercased() ?? ""
 
-        if scheme == "vlc" {
+        if scheme == "vlc" || scheme == "vlc-x-callback" {
             decisionHandler(.cancel)
             openEmbeddedVLC(from: url)
             return
@@ -126,23 +126,51 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
     }
 
     private func openEmbeddedVLC(from customURL: URL) {
-        let raw = customURL.absoluteString
-        guard raw.lowercased().hasPrefix("vlc://") else { return }
-
-        let streamText = String(raw.dropFirst("vlc://".count))
-        let decoded = streamText.removingPercentEncoding ?? streamText
-
-        guard let streamURL = URL(string: decoded),
-              streamURL.scheme?.lowercased() == "http",
-              streamURL.host == "127.0.0.1",
-              streamURL.port == 8090 else {
-            showError("Не удалось разобрать локальную ссылку TorrServer для VLC.")
+        guard let streamURL = extractEmbeddedVLCStreamURL(from: customURL) else {
+            showError("Не удалось разобрать ссылку видео для встроенного VLC.")
             return
         }
 
         let player = VLCPlayerViewController(streamURL: streamURL)
         player.modalPresentationStyle = .fullScreen
         present(player, animated: true)
+    }
+
+    private func extractEmbeddedVLCStreamURL(from customURL: URL) -> URL? {
+        let raw = customURL.absoluteString
+        let scheme = customURL.scheme?.lowercased() ?? ""
+
+        var candidate: String?
+
+        if scheme == "vlc-x-callback" {
+            if let components = URLComponents(url: customURL, resolvingAgainstBaseURL: false) {
+                candidate = components.queryItems?.first(where: { $0.name.lowercased() == "url" })?.value
+            }
+        } else if scheme == "vlc", raw.lowercased().hasPrefix("vlc://") {
+            candidate = String(raw.dropFirst("vlc://".count))
+        }
+
+        guard var value = candidate, !value.isEmpty else { return nil }
+
+        for _ in 0..<3 {
+            let decoded = value.removingPercentEncoding ?? value
+            if decoded == value { break }
+            value = decoded
+        }
+
+        if let range = value.range(of: "http://", options: .caseInsensitive) {
+            value = String(value[range.lowerBound...])
+        } else if let range = value.range(of: "https://", options: .caseInsensitive) {
+            value = String(value[range.lowerBound...])
+        }
+
+        guard let url = URL(string: value),
+              let mediaScheme = url.scheme?.lowercased(),
+              mediaScheme == "http" || mediaScheme == "https" else {
+            return nil
+        }
+
+        return url
     }
 
     private func showError(_ message: String) {
@@ -159,6 +187,9 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
         try {
             localStorage.setItem('torrserver_url', 'http://127.0.0.1:8090');
             localStorage.setItem('torrserver_use_link', 'one');
+
+            // Use embedded VLCKit for both ordinary online video and torrents.
+            localStorage.setItem('player', 'vlc');
             localStorage.setItem('player_torrent', 'vlc');
 
             window.LampaTorr = {
@@ -179,7 +210,7 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
         if (window.__lampatorrTorrProxyInstalled) return;
         window.__lampatorrTorrProxyInstalled = true;
 
-        var target = /^http://127.0.0.1:8090(?=/|$)/i;
+        var target = /^http:\/\/127\.0\.0\.1:8090(?=\/|$)/i;
         var bridge = function (payload) {
             return window.webkit.messageHandlers.torrProxy.postMessage(payload);
         };
@@ -200,10 +231,10 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
                     });
                 }
             }
-
             return result;
         }
 
+        // fetch() proxy
         var nativeFetch = window.fetch.bind(window);
         window.fetch = function (input, init) {
             var url = typeof input === 'string' ? input : (input && input.url ? input.url : '');
@@ -225,142 +256,243 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
                 timeout: 30000
             }).then(function (result) {
                 return new Response(result.body || '', {
-                    status: result.status || 200,
+                    status: Number(result.status || 200),
                     statusText: result.statusText || '',
                     headers: result.headers || {}
                 });
             });
         };
 
-        function installJQueryProxy() {
-            var jq = window.jQuery || window.$;
+        // XMLHttpRequest proxy. This is installed at documentStart, before
+        // Lampa/jQuery can make the first TorrServer connection test.
+        var NativeXHR = window.XMLHttpRequest;
 
-            if (!jq || typeof jq.ajax !== 'function') {
-                setTimeout(installJQueryProxy, 25);
-                return;
-            }
+        function ProxyXHR() {
+            this._native = new NativeXHR();
+            this._proxy = false;
+            this._method = 'GET';
+            this._url = '';
+            this._headers = {};
+            this._responseHeaders = {};
+            this._readyState = 0;
+            this._status = 0;
+            this._statusText = '';
+            this._responseText = '';
+            this._response = '';
+            this._responseURL = '';
+            this._aborted = false;
+            this._listeners = {};
+            this._timeout = 0;
+            this._responseType = '';
+            this._withCredentials = false;
 
-            if (jq.ajax.__lampatorrWrapped) return;
-
-            var nativeAjax = jq.ajax.bind(jq);
-
-            var wrappedAjax = function (options) {
-                var originalArguments = arguments;
-                var opts;
-
-                if (typeof options === 'string') {
-                    opts = Object.assign({}, arguments[1] || {}, { url: options });
-                } else {
-                    opts = Object.assign({}, options || {});
-                }
-
-                var url = String(opts.url || '');
-                if (!target.test(url)) {
-                    return nativeAjax.apply(jq, originalArguments);
-                }
-
-                var headers = normalizeHeaders(opts.headers);
-                var aborted = false;
-
-                var fakeXHR = {
-                    readyState: 1,
-                    status: 0,
-                    statusText: '',
-                    responseText: '',
-                    response: '',
-                    responseJSON: undefined,
-                    setRequestHeader: function (name, value) {
-                        headers[String(name)] = String(value);
-                    },
-                    getResponseHeader: function (name) {
-                        var wanted = String(name).toLowerCase();
-                        var keys = Object.keys(this.__headers || {});
-                        for (var i = 0; i < keys.length; i++) {
-                            if (keys[i].toLowerCase() === wanted) return this.__headers[keys[i]];
-                        }
-                        return null;
-                    },
-                    getAllResponseHeaders: function () {
-                        var h = this.__headers || {};
-                        return Object.keys(h).map(function (key) {
-                            return key + ': ' + h[key];
-                        }).join('\r\n');
-                    },
-                    abort: function () {
-                        aborted = true;
-                    }
-                };
-
-                if (typeof opts.beforeSend === 'function') {
-                    try {
-                        if (opts.beforeSend(fakeXHR, opts) === false) {
-                            fakeXHR.abort();
-                            return fakeXHR;
-                        }
-                    } catch (_) {}
-                }
-
-                var method = String(opts.type || opts.method || (opts.data != null ? 'POST' : 'GET')).toUpperCase();
-                var body = opts.data == null
-                    ? null
-                    : (typeof opts.data === 'string' ? opts.data : JSON.stringify(opts.data));
-
-                bridge({
-                    url: url,
-                    method: method,
-                    headers: headers,
-                    body: body,
-                    timeout: Number(opts.timeout || 30000)
-                }).then(function (result) {
-                    if (aborted) return;
-
-                    fakeXHR.readyState = 4;
-                    fakeXHR.status = Number(result.status || 0);
-                    fakeXHR.statusText = result.statusText || '';
-                    fakeXHR.responseText = result.body || '';
-                    fakeXHR.response = fakeXHR.responseText;
-                    fakeXHR.__headers = result.headers || {};
-
-                    var payload = fakeXHR.responseText;
-                    var dataType = String(opts.dataType || 'json').toLowerCase();
-
-                    if (dataType === 'json') {
-                        try {
-                            payload = payload ? JSON.parse(payload) : null;
-                            fakeXHR.responseJSON = payload;
-                        } catch (parseError) {
-                            if (typeof opts.error === 'function') opts.error(fakeXHR, 'parsererror', parseError);
-                            if (typeof opts.complete === 'function') opts.complete(fakeXHR, 'parsererror');
-                            return;
-                        }
-                    }
-
-                    if (fakeXHR.status >= 200 && fakeXHR.status < 300) {
-                        if (typeof opts.success === 'function') opts.success(payload, 'success', fakeXHR);
-                        if (typeof opts.complete === 'function') opts.complete(fakeXHR, 'success');
-                    } else {
-                        if (typeof opts.error === 'function') opts.error(fakeXHR, 'error', fakeXHR.statusText);
-                        if (typeof opts.complete === 'function') opts.complete(fakeXHR, 'error');
-                    }
-                }).catch(function (error) {
-                    if (aborted) return;
-
-                    fakeXHR.readyState = 4;
-                    fakeXHR.status = 0;
-                    fakeXHR.statusText = String(error && error.message ? error.message : error);
-
-                    if (typeof opts.error === 'function') opts.error(fakeXHR, 'error', fakeXHR.statusText);
-                    if (typeof opts.complete === 'function') opts.complete(fakeXHR, 'error');
+            var self = this;
+            ['loadstart','progress','abort','error','load','timeout','loadend','readystatechange'].forEach(function (type) {
+                self['_on' + type] = null;
+                self._native.addEventListener(type, function (event) {
+                    if (!self._proxy) self._emit(type, event);
                 });
-
-                return fakeXHR;
-            };
-
-            wrappedAjax.__lampatorrWrapped = true;
-            jq.ajax = wrappedAjax;
+            });
         }
 
-        installJQueryProxy();
+        ProxyXHR.prototype._emit = function (type, event) {
+            event = event || new Event(type);
+
+            var handler = this['_on' + type];
+            if (typeof handler === 'function') {
+                try { handler.call(this, event); } catch (_) {}
+            }
+
+            var listeners = this._listeners[type] || [];
+            listeners.slice().forEach(function (listener) {
+                try { listener.call(this, event); } catch (_) {}
+            }, this);
+        };
+
+        ProxyXHR.prototype.addEventListener = function (type, listener) {
+            if (!this._listeners[type]) this._listeners[type] = [];
+            this._listeners[type].push(listener);
+        };
+
+        ProxyXHR.prototype.removeEventListener = function (type, listener) {
+            var list = this._listeners[type] || [];
+            var index = list.indexOf(listener);
+            if (index >= 0) list.splice(index, 1);
+        };
+
+        ProxyXHR.prototype.dispatchEvent = function (event) {
+            this._emit(event.type, event);
+            return true;
+        };
+
+        ProxyXHR.prototype.open = function (method, url, async, user, password) {
+            var textURL = String(url);
+            this._proxy = target.test(textURL);
+            this._method = String(method || 'GET').toUpperCase();
+            this._url = textURL;
+            this._aborted = false;
+
+            if (!this._proxy) {
+                return this._native.open(method, url, async === undefined ? true : async, user, password);
+            }
+
+            if (async === false) {
+                throw new Error('Synchronous TorrServer XHR is not supported by LampaTorr');
+            }
+
+            this._readyState = 1;
+            this._emit('readystatechange');
+        };
+
+        ProxyXHR.prototype.setRequestHeader = function (name, value) {
+            if (!this._proxy) return this._native.setRequestHeader(name, value);
+            this._headers[String(name)] = String(value);
+        };
+
+        ProxyXHR.prototype.overrideMimeType = function (value) {
+            if (!this._proxy && this._native.overrideMimeType) {
+                return this._native.overrideMimeType(value);
+            }
+        };
+
+        ProxyXHR.prototype.getResponseHeader = function (name) {
+            if (!this._proxy) return this._native.getResponseHeader(name);
+
+            var wanted = String(name).toLowerCase();
+            var keys = Object.keys(this._responseHeaders || {});
+            for (var i = 0; i < keys.length; i++) {
+                if (keys[i].toLowerCase() === wanted) return this._responseHeaders[keys[i]];
+            }
+            return null;
+        };
+
+        ProxyXHR.prototype.getAllResponseHeaders = function () {
+            if (!this._proxy) return this._native.getAllResponseHeaders();
+
+            var headers = this._responseHeaders || {};
+            return Object.keys(headers).map(function (key) {
+                return key + ': ' + headers[key];
+            }).join('\r\n');
+        };
+
+        ProxyXHR.prototype.abort = function () {
+            if (!this._proxy) return this._native.abort();
+
+            this._aborted = true;
+            this._readyState = 0;
+            this._emit('abort');
+            this._emit('loadend');
+        };
+
+        ProxyXHR.prototype.send = function (body) {
+            if (!this._proxy) return this._native.send(body);
+
+            var self = this;
+            var requestBody = null;
+
+            if (body != null) {
+                if (typeof body === 'string') requestBody = body;
+                else if (body instanceof URLSearchParams) requestBody = body.toString();
+                else {
+                    try { requestBody = JSON.stringify(body); }
+                    catch (_) { requestBody = String(body); }
+                }
+            }
+
+            this._emit('loadstart');
+
+            bridge({
+                url: this._url,
+                method: this._method,
+                headers: this._headers,
+                body: requestBody,
+                timeout: Number(this._timeout || 30000)
+            }).then(function (result) {
+                if (self._aborted) return;
+
+                self._responseHeaders = result.headers || {};
+                self._status = Number(result.status || 0);
+                self._statusText = result.statusText || '';
+                self._responseText = result.body || '';
+                self._responseURL = self._url;
+
+                self._readyState = 2;
+                self._emit('readystatechange');
+                self._readyState = 3;
+                self._emit('readystatechange');
+
+                if (self._responseType === 'json') {
+                    try { self._response = self._responseText ? JSON.parse(self._responseText) : null; }
+                    catch (_) { self._response = null; }
+                } else {
+                    self._response = self._responseText;
+                }
+
+                self._readyState = 4;
+                self._emit('readystatechange');
+
+                if (self._status >= 200 && self._status < 400) {
+                    self._emit('load');
+                } else {
+                    self._emit('error');
+                }
+                self._emit('loadend');
+            }).catch(function (error) {
+                if (self._aborted) return;
+
+                self._status = 0;
+                self._statusText = String(error && error.message ? error.message : error);
+                self._readyState = 4;
+                self._emit('readystatechange');
+                self._emit('error');
+                self._emit('loadend');
+            });
+        };
+
+        Object.defineProperties(ProxyXHR.prototype, {
+            readyState: { get: function () { return this._proxy ? this._readyState : this._native.readyState; } },
+            status: { get: function () { return this._proxy ? this._status : this._native.status; } },
+            statusText: { get: function () { return this._proxy ? this._statusText : this._native.statusText; } },
+            responseText: { get: function () { return this._proxy ? this._responseText : this._native.responseText; } },
+            response: { get: function () { return this._proxy ? this._response : this._native.response; } },
+            responseURL: { get: function () { return this._proxy ? this._responseURL : this._native.responseURL; } },
+            responseXML: { get: function () { return this._proxy ? null : this._native.responseXML; } },
+            timeout: {
+                get: function () { return this._proxy ? this._timeout : this._native.timeout; },
+                set: function (value) { this._timeout = Number(value || 0); if (!this._proxy) this._native.timeout = value; }
+            },
+            responseType: {
+                get: function () { return this._proxy ? this._responseType : this._native.responseType; },
+                set: function (value) { this._responseType = value || ''; if (!this._proxy) this._native.responseType = value; }
+            },
+            withCredentials: {
+                get: function () { return this._proxy ? this._withCredentials : this._native.withCredentials; },
+                set: function (value) { this._withCredentials = !!value; if (!this._proxy) this._native.withCredentials = value; }
+            },
+            upload: { get: function () { return this._native.upload; } },
+
+            onloadstart: { get: function () { return this._onloadstart; }, set: function (v) { this._onloadstart = v; } },
+            onprogress: { get: function () { return this._onprogress; }, set: function (v) { this._onprogress = v; } },
+            onabort: { get: function () { return this._onabort; }, set: function (v) { this._onabort = v; } },
+            onerror: { get: function () { return this._onerror; }, set: function (v) { this._onerror = v; } },
+            onload: { get: function () { return this._onload; }, set: function (v) { this._onload = v; } },
+            ontimeout: { get: function () { return this._ontimeout; }, set: function (v) { this._ontimeout = v; } },
+            onloadend: { get: function () { return this._onloadend; }, set: function (v) { this._onloadend = v; } },
+            onreadystatechange: { get: function () { return this._onreadystatechange; }, set: function (v) { this._onreadystatechange = v; } }
+        });
+
+        ProxyXHR.UNSENT = 0;
+        ProxyXHR.OPENED = 1;
+        ProxyXHR.HEADERS_RECEIVED = 2;
+        ProxyXHR.LOADING = 3;
+        ProxyXHR.DONE = 4;
+        ProxyXHR.prototype.UNSENT = 0;
+        ProxyXHR.prototype.OPENED = 1;
+        ProxyXHR.prototype.HEADERS_RECEIVED = 2;
+        ProxyXHR.prototype.LOADING = 3;
+        ProxyXHR.prototype.DONE = 4;
+
+        window.XMLHttpRequest = ProxyXHR;
     })();
     """#
 }
