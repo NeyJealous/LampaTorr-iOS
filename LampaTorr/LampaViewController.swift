@@ -17,6 +17,7 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        ExternalVLCBackgroundKeeper.shared.stop()
         endExternalPlaybackBackgroundTask()
         UIApplication.shared.isIdleTimerDisabled = true
         TorrServerManager.shared.ensureRunning()
@@ -144,26 +145,22 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
     }
 
     private func openExternalVLC(from customURL: URL) {
-        let targetURL: URL?
-
-        if customURL.scheme?.lowercased() == "vlc-x-callback" {
-            targetURL = customURL
-        } else if let streamURL = extractMediaStreamURL(from: customURL) {
-            var components = URLComponents()
-            components.scheme = "vlc-x-callback"
-            components.host = "x-callback-url"
-            components.path = "/stream"
-            components.queryItems = [
-                URLQueryItem(name: "url", value: streamURL.absoluteString)
-            ]
-            targetURL = components.url
-        } else {
-            targetURL = nil
-        }
-
-        guard let targetURL else {
+        guard let streamURL = extractMediaStreamURL(from: customURL) else {
             let preview = String(customURL.absoluteString.prefix(260))
             showError("Не удалось подготовить ссылку для оригинального VLC.\n\nURL: \(preview)")
+            return
+        }
+
+        var components = URLComponents()
+        components.scheme = "vlc-x-callback"
+        components.host = "x-callback-url"
+        components.path = "/stream"
+        components.queryItems = [
+            URLQueryItem(name: "url", value: streamURL.absoluteString)
+        ]
+
+        guard let targetURL = components.url else {
+            showError("Не удалось сформировать x-callback ссылку для VLC.")
             return
         }
 
@@ -172,12 +169,27 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
             return
         }
 
+        let usesEmbeddedTorrServer =
+            streamURL.scheme?.lowercased() == "http" &&
+            streamURL.host == "127.0.0.1" &&
+            streamURL.port == 8090
+
+        if usesEmbeddedTorrServer {
+            do {
+                try ExternalVLCBackgroundKeeper.shared.start()
+            } catch {
+                showError("Не удалось включить background-режим TorrServer: \(error.localizedDescription)")
+                return
+            }
+        }
+
         beginExternalPlaybackBackgroundTask()
 
         UIApplication.shared.open(targetURL, options: [:]) { [weak self] opened in
             guard let self else { return }
 
             if !opened {
+                ExternalVLCBackgroundKeeper.shared.stop()
                 self.endExternalPlaybackBackgroundTask()
                 self.showError("iOS не смогла открыть ссылку в оригинальном VLC.")
             }
