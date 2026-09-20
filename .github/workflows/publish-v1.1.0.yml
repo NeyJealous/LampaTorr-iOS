@@ -1,0 +1,54 @@
+name: Publish v1.1.0 external VLC release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/publish-v1.1.0.yml
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download successful v1.1.0 artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-artifact
+          gh run download 35515360919 \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "LampaTorr-LampaS-unsigned-ipa" \
+            --dir release-artifact
+          find release-artifact -maxdepth 2 -type f -print
+
+      - name: Create release ZIP
+        run: |
+          set -euo pipefail
+          cd release-artifact
+          zip -9 -r ../LampaTorr-v1.1.0-external-VLC-unsigned.zip .
+          cd ..
+          ls -lh LampaTorr-v1.1.0-external-VLC-unsigned.zip
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v1.1.0"
+          FILE="LampaTorr-v1.1.0-external-VLC-unsigned.zip"
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$FILE" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" "$FILE" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "cff3a5b707062ff409eb3319254102a069d2d7d9" \
+              --title "LampaTorr v1.1.0 — External VLC" \
+              --notes "External-VLC test build. Embedded VLCKit and the custom VLC player are removed. LampaTorr keeps embedded TorrServerKit and opens the installed official VLC for Mobile using vlc-x-callback. If playback later stops after LampaTorr is backgrounded, that points to iOS suspending the embedded TorrServer process rather than a VLC decoder/UI issue."
+          fi
