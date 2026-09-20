@@ -65,7 +65,7 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
         configuration.userContentController.addUserScript(
             WKUserScript(
                 source: Self.diagnosticsScript,
-                injectionTime: .atDocumentEnd,
+                injectionTime: .atDocumentStart,
                 forMainFrameOnly: true
             )
         )
@@ -673,7 +673,10 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
                 cubDomain: cubDomain,
                 cubAlive: cubAlive,
                 errors: errors.slice(0, 10),
-                successes: successes.slice(0, 5)
+                successes: successes.slice(0, 5),
+                markerSocket: (document.querySelector('.head__markers .item--socket') || {}).className || '',
+                markerMirrors: (document.querySelector('.head__markers .item--mirrors') || {}).className || '',
+                markerRequest: (document.querySelector('.head__markers .item--request') || {}).className || ''
             });
         }
 
@@ -681,13 +684,13 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
             if (installed) return;
 
             if (!window.Lampa || !Lampa.Listener || typeof Lampa.Listener.follow !== 'function') {
-                setTimeout(install, 250);
+                setTimeout(install, 10);
                 return;
             }
 
             var markers = document.querySelector('.head__markers');
             if (!markers) {
-                setTimeout(install, 250);
+                setTimeout(install, 10);
                 return;
             }
 
