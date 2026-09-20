@@ -1,0 +1,54 @@
+name: Publish v1.1.1 external VLC keepalive release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/publish-v1.1.1.yml
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download successful v1.1.1 artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-artifact
+          gh run download 35519186768 \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "LampaTorr-LampaS-unsigned-ipa" \
+            --dir release-artifact
+          find release-artifact -maxdepth 2 -type f -print
+
+      - name: Create release ZIP
+        run: |
+          set -euo pipefail
+          cd release-artifact
+          zip -9 -r ../LampaTorr-v1.1.1-external-VLC-keepalive-unsigned.zip .
+          cd ..
+          ls -lh LampaTorr-v1.1.1-external-VLC-keepalive-unsigned.zip
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v1.1.1"
+          FILE="LampaTorr-v1.1.1-external-VLC-keepalive-unsigned.zip"
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$FILE" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" "$FILE" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "8e197b8d85f20154f459f8c5f44868ff21e5d261" \
+              --title "LampaTorr v1.1.1 — External VLC Keepalive" \
+              --notes "Experimental external-VLC build for personal sideloading. Keeps LampaTorr active in the background with an inaudible mixed audio session while official VLC for Mobile reads the embedded TorrServer stream from 127.0.0.1:8090. This tests the iOS suspension hypothesis behind the v1.1.0 first-frame-then-close failure."
+          fi
