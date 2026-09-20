@@ -5,6 +5,7 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
     private var webView: WKWebView!
     private let torrProxy = TorrProxyBridge()
     private var diagnosticsBridge: LampaDiagnosticsBridge!
+    private var externalPlaybackBackgroundTask: UIBackgroundTaskIdentifier = .invalid
     private let lampaURL = URL(string: "https://cf.lampa.mx")!
 
     override func viewDidLoad() {
@@ -16,6 +17,7 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        endExternalPlaybackBackgroundTask()
         UIApplication.shared.isIdleTimerDisabled = true
         TorrServerManager.shared.ensureRunning()
     }
@@ -114,7 +116,7 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
 
         if scheme == "vlc" || scheme == "vlc-x-callback" {
             decisionHandler(.cancel)
-            openEmbeddedVLC(from: url)
+            openExternalVLC(from: url)
             return
         }
 
@@ -141,27 +143,68 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
         return nil
     }
 
-    private func openEmbeddedVLC(from customURL: URL) {
-        guard let streamURL = extractEmbeddedVLCStreamURL(from: customURL) else {
-            let raw = customURL.absoluteString
-            let preview = String(raw.prefix(260))
-            showError("Не удалось разобрать ссылку видео для встроенного VLC.\n\nСхема: \(customURL.scheme ?? "—")\nURL: \(preview)")
+    private func openExternalVLC(from customURL: URL) {
+        let targetURL: URL?
+
+        if customURL.scheme?.lowercased() == "vlc-x-callback" {
+            targetURL = customURL
+        } else if let streamURL = extractMediaStreamURL(from: customURL) {
+            var components = URLComponents()
+            components.scheme = "vlc-x-callback"
+            components.host = "x-callback-url"
+            components.path = "/stream"
+            components.queryItems = [
+                URLQueryItem(name: "url", value: streamURL.absoluteString)
+            ]
+            targetURL = components.url
+        } else {
+            targetURL = nil
+        }
+
+        guard let targetURL else {
+            let preview = String(customURL.absoluteString.prefix(260))
+            showError("Не удалось подготовить ссылку для оригинального VLC.\n\nURL: \(preview)")
             return
         }
 
-        let player = VLCPlayerViewController(streamURL: streamURL)
-        player.modalPresentationStyle = .fullScreen
-        present(player, animated: true)
+        guard UIApplication.shared.canOpenURL(targetURL) else {
+            showError("Оригинальный VLC не найден. Установи VLC for Mobile и повтори запуск.")
+            return
+        }
+
+        beginExternalPlaybackBackgroundTask()
+
+        UIApplication.shared.open(targetURL, options: [:]) { [weak self] opened in
+            guard let self else { return }
+
+            if !opened {
+                self.endExternalPlaybackBackgroundTask()
+                self.showError("iOS не смогла открыть ссылку в оригинальном VLC.")
+            }
+        }
     }
 
-    private func extractEmbeddedVLCStreamURL(from customURL: URL) -> URL? {
+    private func beginExternalPlaybackBackgroundTask() {
+        endExternalPlaybackBackgroundTask()
+
+        externalPlaybackBackgroundTask = UIApplication.shared.beginBackgroundTask(
+            withName: "LampaTorr External VLC"
+        ) { [weak self] in
+            self?.endExternalPlaybackBackgroundTask()
+        }
+    }
+
+    private func endExternalPlaybackBackgroundTask() {
+        guard externalPlaybackBackgroundTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(externalPlaybackBackgroundTask)
+        externalPlaybackBackgroundTask = .invalid
+    }
+
+    private func extractMediaStreamURL(from customURL: URL) -> URL? {
         let raw = customURL.absoluteString
         let scheme = customURL.scheme?.lowercased() ?? ""
 
         if scheme == "vlc" {
-            // Lampa emits: vlc://http://127.0.0.1:8090/stream/...
-            // Foundation parses the nested "http" as the HOST of the outer vlc URL.
-            // Rebuild the inner URL from parsed components before trying raw fallbacks.
             if let nestedScheme = customURL.host?.lowercased(),
                nestedScheme == "http" || nestedScheme == "https" {
 
@@ -185,53 +228,34 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
                     }
                 }
 
-                if let url = makeEmbeddedMediaURL(rebuilt) {
+                if let url = makeMediaURL(rebuilt) {
                     return url
                 }
             }
 
             if raw.lowercased().hasPrefix("vlc://") {
                 let candidate = String(raw.dropFirst("vlc://".count))
-                if let url = makeEmbeddedMediaURL(candidate) {
+                if let url = makeMediaURL(candidate) {
                     return url
                 }
             }
         }
 
         if scheme == "vlc-x-callback",
-           let components = URLComponents(url: customURL, resolvingAgainstBaseURL: false) {
-
-            // Prefer percentEncodedQuery so an encoded stream URL keeps its own
-            // ?, &, Unicode filename and other delimiters intact.
-            if let query = components.percentEncodedQuery {
-                for item in query.split(separator: "&", omittingEmptySubsequences: false) {
-                    let pair = item.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-                    guard pair.count == 2,
-                          pair[0].lowercased() == "url" else { continue }
-
-                    let encodedValue = String(pair[1])
-                    if let url = makeEmbeddedMediaURL(encodedValue) {
-                        return url
-                    }
-                }
-            }
-
-            if let value = components.queryItems?.first(where: { $0.name.lowercased() == "url" })?.value,
-               let url = makeEmbeddedMediaURL(value) {
-                return url
-            }
+           let components = URLComponents(url: customURL, resolvingAgainstBaseURL: false),
+           let value = components.queryItems?.first(where: { $0.name.lowercased() == "url" })?.value {
+            return makeMediaURL(value)
         }
 
         return nil
     }
 
-    private func makeEmbeddedMediaURL(_ source: String) -> URL? {
+    private func makeMediaURL(_ source: String) -> URL? {
         guard !source.isEmpty else { return nil }
 
         var candidates: [String] = [source]
         var current = source
 
-        // Some player schemes encode the whole media URL once or twice.
         for _ in 0..<3 {
             guard let decoded = current.removingPercentEncoding,
                   decoded != current else { break }
@@ -283,13 +307,14 @@ final class LampaViewController: UIViewController, WKNavigationDelegate, WKUIDel
             localStorage.setItem('torrserver_url', 'http://127.0.0.1:8090');
             localStorage.setItem('torrserver_use_link', 'one');
 
-            // Use embedded VLCKit for both ordinary online video and torrents.
+            // Delegate video playback to the installed official VLC app.
             localStorage.setItem('player', 'vlc');
             localStorage.setItem('player_torrent', 'vlc');
 
             window.LampaTorr = {
                 embeddedTorrServer: true,
-                embeddedVLC: true,
+                embeddedVLC: false,
+                externalVLC: true,
                 nativeTorrProxy: true,
                 torrServerURL: 'http://127.0.0.1:8090',
                 sourceURL: 'https://cf.lampa.mx'
